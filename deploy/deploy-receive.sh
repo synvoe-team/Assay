@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# Assay 部署接收端（容器蓝绿版）：由 GitHub Actions 经 SSH 调用。
+# Assay 部署接收端（netcup 宿主 nginx 蓝绿版）：由 GitHub Actions 经 SSH 调用。
 # 通过 authorized_keys 的 command= 强制命令绑定到部署专用 key——那把 key 只能执行本脚本。
 #
 # 协议：SSH_ORIGINAL_COMMAND = "deploy <tag> <sha256>"，stdin = docker 镜像 tar.gz（含 assay:<tag>）
-# 无迁移：起新色容器 → 健康检查 → openresty upstream 切流（nginx -t 通过才平滑 reload）→ 停旧色，零停机
+# 无迁移：起新色容器 → 健康检查 → 宿主 nginx upstream 切流（nginx -t 通过才平滑 reload）→ 停旧色，零停机
 # 有迁移：pg_dump 备份 → 停旧色 → 起新色（启动时自动迁移）→ 切流，短停机
 # 失败：新容器不健康则删除之、保持旧色在线（迁移路径下重启旧色）；数据库只 roll-forward
 set -euo pipefail
 
 ROOT=/opt/assay
 ENV_FILE=$ROOT/env
-UPSTREAM_CONF=/opt/1panel/www/conf.d/assay-upstream.conf
-ENTRY_URL=http://127.0.0.1:8321/api/version
-declare -A PORT=([blue]=8322 [green]=8323)
+UPSTREAM_CONF=/etc/nginx/conf.d/assay-upstream.conf   # 全局 http{} 已 include conf.d/*.conf
+declare -A PORT=([blue]=18820 [green]=18821)
 
 write_upstream() {
   printf 'upstream assay_backend {\n    server 127.0.0.1:%s;\n}\n' "$1" > "$UPSTREAM_CONF"
@@ -77,24 +76,25 @@ if [[ -z "$ok" ]]; then
   exit 1
 fi
 
-# 切流：先 nginx -t 校验（保护共享 openresty），通过才平滑 reload
+# 切流：写宿主 nginx upstream include，先 nginx -t 校验（保护同机 ~30 个站点）通过才平滑 reload
 write_upstream "${PORT[$target]}"
-if ! docker exec OpenResty nginx -t >/dev/null 2>&1; then
-  echo "[deploy] openresty 配置校验失败，恢复原 upstream" >&2
+if ! nginx -t >/dev/null 2>&1; then
+  echo "[deploy] nginx 配置校验失败，恢复原 upstream" >&2
   [[ -n "$active" ]] && write_upstream "${PORT[$active]}"
   docker rm -f "assay-$target" >/dev/null 2>&1 || true
   [[ "$pending" != "0" && -n "$active" ]] && docker start "assay-$active" >/dev/null
   exit 1
 fi
-docker exec OpenResty nginx -s reload
+systemctl reload nginx
 
-# 入口验证：8321 必须已切到新版本
+# 入口验证：经宿主 nginx（本地回环 + SNI）必须已切到新版本
 entry_ok=""
 for _ in $(seq 1 5); do
   sleep 1
-  curl -sf --max-time 2 "$ENTRY_URL" | grep -q "\"$tag\"" && { entry_ok=1; break; }
+  curl -sk --max-time 3 https://assay.yukihoapi.com/api/version \
+    --resolve assay.yukihoapi.com:443:127.0.0.1 | grep -q "\"$tag\"" && { entry_ok=1; break; }
 done
-[[ -n "$entry_ok" ]] || { echo "[deploy] 入口 :8321 未切到 $tag，请人工检查" >&2; exit 1; }
+[[ -n "$entry_ok" ]] || { echo "[deploy] 入口未切到 $tag，请人工检查" >&2; exit 1; }
 
 # 下线旧色
 if [[ -n "$active" && "$active" != "$target" ]]; then
