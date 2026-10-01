@@ -881,7 +881,7 @@ function SnapshotCard({
     ],
     [
       t('stab.maxTotalRequests'),
-      `${p.maxTotalRequests} · ${t('stab.maxTotalTokens')} ${p.maxTotalTokens} · ${t('stab.requestTimeout')} ${p.requestTimeoutMs}`,
+      `${p.maxTotalRequests} · ${t('stab.maxTotalTokens')} ${p.maxTotalTokens} · ${t('stab.maxDurationSec')} ${p.maxDurationSec} · ${t('stab.requestTimeout')} ${p.requestTimeoutMs}`,
     ],
   ]
   // RPM 实测参数仅在勾选 rpm_probe 时定格展示
