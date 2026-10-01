@@ -97,7 +97,7 @@ func runLadderStage(ctx context.Context, in RunInput, stageIndex int, stage stri
 			// 闭环：dispatched_at 记实际起飞时刻（并发槽就绪即发）
 			dispatchedAt := time.Now()
 			o := doRequest(gctx, in.Client, in.Codec, in.Target.BaseURL, in.APIKey,
-				in.Target.Model, ladderPrompt, in.Params.LadderMaxTokens, in.Params.RequestTimeoutMs)
+				in.Target.Model, uniquePrompt(in.Nonce, stage, seq, ladderPrompt), in.Params.LadderMaxTokens, in.Params.RequestTimeoutMs)
 			// 中止（关停/取消）时不落污染样本：context canceled 非渠道行为
 			if gctx.Err() != nil {
 				return gctx.Err()

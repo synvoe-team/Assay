@@ -201,6 +201,12 @@ func sampleFrom(stage string, stageIndex, seq int, warmup bool, dispatchedAt tim
 	return s
 }
 
+// uniquePrompt 给压测 prompt 拼唯一前缀「[nonce 档位-序号] 」。前缀放最前面：
+// 前缀缓存按开头匹配，开头不同才破得掉；档位标签各 probe 互异（c/r/t 开头），任务内必唯一。
+func uniquePrompt(nonce, stage string, seq int, base string) string {
+	return fmt.Sprintf("[%s %s-%d] %s", nonce, stage, seq, base)
+}
+
 func truncateOneLine(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
 	if r := []rune(s); len(r) > 200 {

@@ -91,7 +91,7 @@ func runPacedStage(ctx context.Context, in RunInput, stageIndex int, stage strin
 			defer wg.Done()
 			defer func() { <-inflight }()
 			o := doRequest(ctx, in.Client, in.Codec, in.Target.BaseURL, in.APIKey,
-				in.Target.Model, cfg.Prompt, cfg.MaxTokens, in.Params.RequestTimeoutMs)
+				in.Target.Model, uniquePrompt(in.Nonce, stage, sqN, cfg.Prompt), cfg.MaxTokens, in.Params.RequestTimeoutMs)
 			if ctx.Err() != nil {
 				return // 取消/关停：不落污染样本
 			}

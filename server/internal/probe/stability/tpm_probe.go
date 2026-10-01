@@ -13,9 +13,9 @@ const (
 	// tpmPrompt 顶格数数 prompt：诱导模型一直生成到 max_tokens，保证每请求输出打满砝码，
 	// 使「每请求 token 权重 ≈ 输入 + max_tokens」稳定成立，token 到达率才可控。
 	tpmPrompt = "请从 1 开始逐个数数：1、2、3、4 …… 一直数下去，数字之间用顿号分隔，不要停、不要重复、不要输出任何多余说明。"
-	// tpmInputTokensEst 固定 prompt 的输入 token 名义估算，仅用于「目标 token 速率 → 请求速率」的先验换算；
-	// 实测 token 吞吐仍以响应 usage 的真实输入+输出为准。
-	tpmInputTokensEst = 16.0
+	// tpmInputTokensEst 固定 prompt（含 uniquePrompt 前缀约 8 token）的输入 token 名义估算，
+	// 仅用于「目标 token 速率 → 请求速率」的先验换算；实测 token 吞吐仍以响应 usage 的真实输入+输出为准。
+	tpmInputTokensEst = 24.0
 	// tpmRateTol 二分收敛精度：档间 token 速率差窄于此即停（≈1200 TPM 分辨率）
 	tpmRateTol = 20.0
 )

@@ -11,7 +11,7 @@ import (
 )
 
 // tpmInput 组装跑 tpm_probe 的 RunInput，并收集各档 StageMetrics。
-// 令 TpmMaxTokensPerReq=84 → 每请求 token 权重 weight=16+84=100，token 速率 ÷100 即请求速率，
+// 令 TpmMaxTokensPerReq=76 → 每请求 token 权重 weight=24+76=100，token 速率 ÷100 即请求速率，
 // 从而复用 RPM 测试同一套令牌桶上游（按请求限速）与相同的请求速率行为。
 func tpmInput(t *testing.T, baseURL string, tune func(*StabilityParams)) (RunInput, *[]StageMetrics) {
 	t.Helper()
@@ -46,7 +46,7 @@ func tpmInput(t *testing.T, baseURL string, tune func(*StabilityParams)) (RunInp
 func TestTpm_ConvergesToBoundary(t *testing.T) {
 	srv := tokenBucketServer(t, 15)
 	in, metrics := tpmInput(t, srv.URL, func(p *StabilityParams) {
-		p.TpmMaxTokensPerReq = 84 // weight = 16 + 84 = 100
+		p.TpmMaxTokensPerReq = 76 // weight = 24 + 76 = 100
 		p.TpmStartRate = 500      // 5 req/s
 		p.TpmMaxRate = 4000       // 40 req/s
 		p.TpmStageSec = 1
@@ -92,7 +92,7 @@ func TestTpm_ConvergesToBoundary(t *testing.T) {
 func TestTpm_ReachedCap(t *testing.T) {
 	srv, _ := sseChatServer(t, 0, nil) // 永不 429
 	in, metrics := tpmInput(t, srv.URL, func(p *StabilityParams) {
-		p.TpmMaxTokensPerReq = 84 // weight = 100
+		p.TpmMaxTokensPerReq = 76 // weight = 100
 		p.TpmStartRate = 400      // 4 req/s
 		p.TpmMaxRate = 1600       // 16 req/s
 		p.TpmStageSec = 1
@@ -131,7 +131,7 @@ func TestTpm_ReachedCap(t *testing.T) {
 func TestEstTpmRequests(t *testing.T) {
 	var p StabilityParams
 	p.ApplyDefaults()
-	p.TpmMaxTokensPerReq = 84 // weight = 100
+	p.TpmMaxTokensPerReq = 76 // weight = 100
 	p.TpmStartRate = 200
 	p.TpmMaxRate = 800
 	p.TpmStageSec = 10
@@ -146,10 +146,10 @@ func TestEstTpmRequests(t *testing.T) {
 // sumTokens 累计 ok 样本的输入+输出 token，跳过失败样本与缺 usage 的样本。
 func TestSumTokens(t *testing.T) {
 	samples := []Sample{
-		{Ok: true, InputTokens: 3, OutputTokens: 2}, // 5
-		{Ok: true, InputTokens: 10, OutputTokens: 0}, // 10（输出缺省不计）
+		{Ok: true, InputTokens: 3, OutputTokens: 2},      // 5
+		{Ok: true, InputTokens: 10, OutputTokens: 0},     // 10（输出缺省不计）
 		{Ok: false, InputTokens: 100, OutputTokens: 100}, // 失败不计
-		{Ok: true, InputTokens: 0, OutputTokens: 7},  // 7
+		{Ok: true, InputTokens: 0, OutputTokens: 7},      // 7
 	}
 	if got := sumTokens(samples); got != 22 {
 		t.Fatalf("sumTokens=%d，期望 22", got)

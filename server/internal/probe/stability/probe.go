@@ -32,6 +32,9 @@ type RunInput struct {
 	Probe  string // 当前 probe ID，填入 Sample/StageMetrics
 	Target probe.Target
 	APIKey string // 执行时现读，绝不进快照
+	// Nonce 任务级随机前缀（取任务 ID 前 8 位），与档位/序号一起拼进每条 prompt，
+	// 让整个任务内无两条请求字节相同——破渠道的整条响应缓存/去重，否则 TTFT 不真实
+	Nonce  string
 	Params StabilityParams
 	Client *http.Client
 	Codec  protocol.Codec

@@ -133,6 +133,7 @@ func (w *StabilityWorker) work(ctx context.Context, taskID uuid.UUID) error {
 			Probe:  id,
 			Target: target,
 			APIKey: secret.ApiKey,
+			Nonce:  taskID.String()[:8],
 			Params: params,
 			Client: w.client,
 			Codec:  codec,
