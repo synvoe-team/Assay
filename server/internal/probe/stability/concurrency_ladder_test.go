@@ -130,7 +130,7 @@ func TestLadderCapStops(t *testing.T) {
 		RequestTimeoutMs:  5000,
 	}
 	params.ApplyDefaults()
-	caps := NewCapGuard(2, 0) // 只准 2 个请求
+	caps := NewCapGuard(2, 0, 0) // 只准 2 个请求
 	in, samples, _, _ := ladderInput(t, srv.URL, params, caps)
 
 	if err := runLadder(context.Background(), in); err != nil {

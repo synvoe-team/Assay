@@ -78,7 +78,7 @@ func rpmInput(t *testing.T, baseURL string, tune func(*StabilityParams)) (RunInp
 		Params: params,
 		Client: &http.Client{},
 		Codec:  codec,
-		Caps:   NewCapGuard(params.MaxTotalRequests, params.MaxTotalTokens),
+		Caps:   NewCapGuard(params.MaxTotalRequests, params.MaxTotalTokens, 0),
 		Metric: func(_ context.Context, m StageMetrics) error {
 			mu.Lock()
 			*metrics = append(*metrics, m)
@@ -199,5 +199,60 @@ func TestIsRateLimited(t *testing.T) {
 	}
 	if isRateLimited(nil, 0.1) != false {
 		t.Fatalf("空样本不应判限速")
+	}
+}
+
+// 修复的 bug：升压途中撞请求硬闸、从没见过 429 → 必须标截断，收敛值只是下界，且不能算「触顶护栏」。
+// 修复前这里报 convergedRpm=240、truncated 无从表达，前端会当成真实边界展示。
+func TestRpm_TruncatedByCaps(t *testing.T) {
+	srv, _ := sseChatServer(t, 0, nil) // 永不 429
+	in, metrics := rpmInput(t, srv.URL, func(p *StabilityParams) {
+		p.RpmStartRate = 4
+		p.RpmMaxRate = 16
+		p.RpmStageSec = 1
+		p.RpmMaxInFlight = 256
+		p.MaxTotalRequests = 7 // r4 档约 5 条跑完，r8 档中途撞闸
+	})
+	in.Caps = NewCapGuard(in.Params.MaxTotalRequests, 0, 0)
+
+	if err := runRpm(context.Background(), in); err != nil {
+		t.Fatalf("runRpm error: %v", err)
+	}
+	m := overallOf(t, *metrics).Metrics
+	if !m.Truncated || m.TruncatedBy != CapRequests {
+		t.Fatalf("truncated=%v by=%q，期望 true/%q", m.Truncated, m.TruncatedBy, CapRequests)
+	}
+	if m.ReachedCap {
+		t.Fatalf("被截断不能算触顶护栏")
+	}
+	if m.ConvergedRpm != 4*60 {
+		t.Fatalf("下界应为完整跑完的 r4 档（240 RPM），得 %.0f", m.ConvergedRpm)
+	}
+}
+
+// 只看每档后一半：429 全落在前一半热身期（渠道消化上一档残留/突发的阶段）时，不判限速。
+// 修复前整档一起算，8/41≈20% ≥ 阈值 10% 会被误判限速。
+func TestRpm_JudgesOnlySecondHalf(t *testing.T) {
+	srv, _ := sseChatServer(t, 0, func(n int64) bool { return n <= 8 }) // 只拒最早 8 条（40/s 下约前 0.2s）
+	in, metrics := rpmInput(t, srv.URL, func(p *StabilityParams) {
+		p.RpmStartRate = 40
+		p.RpmMaxRate = 40
+		p.RpmStageSec = 1 // 前 0.5s 热身
+		p.RpmMaxInFlight = 256
+	})
+
+	if err := runRpm(context.Background(), in); err != nil {
+		t.Fatalf("runRpm error: %v", err)
+	}
+	for _, m := range *metrics {
+		if m.Stage != StageOverall && m.Metrics.RateLimited {
+			t.Fatalf("429 全在热身期，档 %s 不应判限速", m.Stage)
+		}
+		if m.Stage != StageOverall && m.Metrics.ByErrorClass[ErrRateLimited] != 0 {
+			t.Errorf("热身期的 429 不应计入档级指标，得 %v", m.Metrics.ByErrorClass)
+		}
+	}
+	if !overallOf(t, *metrics).Metrics.ReachedCap {
+		t.Errorf("唯一一档未限速，应触顶护栏")
 	}
 }

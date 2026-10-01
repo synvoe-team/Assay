@@ -106,27 +106,25 @@ func runRpm(ctx context.Context, in RunInput) error {
 		overall     []Sample
 		lastHeaders map[string]string
 		stageIndex  int
-		lo          float64 // 已知可持续的最高速率
-		hi          float64 // 已知触发限速的最低速率
-		haveHi      bool
-		stopped     bool
 	)
 
-	// runOne 跑一档：发压→评估→落档级指标→并入 overall；返回本档是否触发限速。
-	runOne := func(rate float64) (bool, error) {
+	// runOne 跑一档：发压→评估→落档级指标→并入 overall；返回本档是否限速、是否撞硬闸。
+	runOne := func(rate float64) (stageOutcome, error) {
 		stage := rpmStageLabel(rate)
 		cfg := pacedStageConfig{
 			TargetRate:  rate,
 			MaxTokens:   p.RpmMaxTokens,
 			Prompt:      rpmPrompt,
 			Duration:    stageDur,
+			Warmup:      stageDur / 2, // 前一半热身，只用后一半判定（见 pacedStageConfig.Warmup）
 			MaxInFlight: p.RpmMaxInFlight,
 		}
 		res, err := runPacedStage(ctx, in, stageIndex, stage, cfg, afterEach)
 		if err != nil {
-			return false, err
+			return stageOutcome{}, err
 		}
-		limited := isRateLimited(res.Samples, p.RpmLimitThreshold)
+		judged := measured(res.Samples)
+		limited := isRateLimited(judged, p.RpmLimitThreshold)
 		achieved := 0.0
 		if res.DurationSec > 0 {
 			achieved = math.Round(float64(res.Dispatched)/res.DurationSec*100) / 100
@@ -137,58 +135,19 @@ func runRpm(ctx context.Context, in RunInput) error {
 		sm := evaluatePacedStage(in.Probe, stage, stageIndex, rate, achieved, limited, res.RateHeaders, res.Samples)
 		if in.Metric != nil {
 			if err := in.Metric(ctx, sm); err != nil {
-				return false, err
+				return stageOutcome{}, err
 			}
 		}
-		overall = append(overall, res.Samples...)
+		overall = append(overall, judged...)
 		stageIndex++
-		if res.Stopped {
-			stopped = true
-		}
-		return limited, nil
+		return stageOutcome{limited: limited, stopped: res.Stopped}, nil
 	}
 
-	// —— ramp：几何递增，撞硬闸 / 触发限速 / 到护栏顶即止 ——
-	for _, rate := range rampRates(p.RpmStartRate, p.RpmMaxRate) {
-		limited, err := runOne(rate)
-		if err != nil {
-			return err
-		}
-		if stopped || ctx.Err() != nil {
-			break
-		}
-		if limited {
-			hi, haveHi = rate, true
-			break
-		}
-		lo = rate
+	b, err := searchBoundary(ctx, rampRates(p.RpmStartRate, p.RpmMaxRate), p.RpmBinarySteps, rpmRateTol, runOne)
+	if err != nil {
+		return err
 	}
-
-	// —— binary：找到限速档后，在通过档 lo 与限速档 hi 间二分细化真实边界 ——
-	if haveHi && !stopped {
-		for i := 0; i < p.RpmBinarySteps && (hi-lo) > rpmRateTol; i++ {
-			if ctx.Err() != nil {
-				break
-			}
-			mid := (lo + hi) / 2
-			limited, err := runOne(mid)
-			if err != nil {
-				return err
-			}
-			if stopped {
-				break
-			}
-			if limited {
-				hi = mid
-			} else {
-				lo = mid
-			}
-		}
-	}
-
-	// reachedCap：一路升到护栏顶仍未触发限速 → 真实边界 ≥ 护栏，未探到顶
-	reachedCap := !haveHi && lo >= p.RpmMaxRate-1e-9
-	om := evaluateRpmOverall(in.Probe, overall, lo*60, reachedCap, lastHeaders)
+	om := evaluateRpmOverall(in.Probe, overall, b, p.RpmMaxRate, in.Caps.Reason(), lastHeaders)
 	if in.Metric != nil {
 		if err := in.Metric(ctx, om); err != nil {
 			return err

@@ -84,7 +84,7 @@ func runLadderStage(ctx context.Context, in RunInput, stageIndex int, stage stri
 
 	for seq := 0; seq < n; seq++ {
 		// 硬闸检查在派发前（主 goroutine）：碰上限即停派后续，本档收敛
-		if in.Caps != nil && (in.Caps.TokensExceeded() || !in.Caps.Reserve()) {
+		if !in.Caps.Reserve() {
 			stop = true
 			break
 		}

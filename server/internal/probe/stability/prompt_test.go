@@ -88,7 +88,7 @@ func TestLadderPromptsUnique(t *testing.T) {
 // TestPacerPromptsUnique 开环档：每条请求 prompt 都唯一
 func TestPacerPromptsUnique(t *testing.T) {
 	srv, prompts := promptRecorder(t)
-	in := pacerInput(srv.URL, NewCapGuard(6, 0), nil)
+	in := pacerInput(srv.URL, NewCapGuard(6, 0, 0), nil)
 	in.Nonce = "n0nce123"
 	cfg := pacedStageConfig{TargetRate: 100, MaxTokens: 16, Prompt: "hi", Duration: time.Second, MaxInFlight: 64}
 	if _, err := runPacedStage(context.Background(), in, 0, "r100", cfg, nil); err != nil {

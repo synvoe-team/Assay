@@ -118,8 +118,8 @@ func (w *StabilityWorker) work(ctx context.Context, taskID uuid.UUID) error {
 		return fmt.Errorf("未知协议 %q", params.Protocol)
 	}
 
-	// 全局成本硬闸跨所有 probe 共享：任一 probe 打满总请求/总 token 上限即收敛。
-	caps := stability.NewCapGuard(params.MaxTotalRequests, params.MaxTotalTokens)
+	// 全局成本硬闸跨所有 probe 共享：任一 probe 打满总请求/总 token/整任务时长上限即收敛。
+	caps := stability.NewCapGuard(params.MaxTotalRequests, params.MaxTotalTokens, time.Duration(params.MaxDurationSec)*time.Second)
 
 	// 按注册顺序执行各检测项，offset 把各 probe 的局部进度串成全局进度
 	offset := 0

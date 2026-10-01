@@ -90,7 +90,7 @@ func TestPacer_ArrivalRate(t *testing.T) {
 // 全局硬闸：请求数上限 5，派发到 5 即停、stopped=true。
 func TestPacer_HardGateRequests(t *testing.T) {
 	srv, _ := sseChatServer(t, 0, nil)
-	caps := NewCapGuard(5, 0)
+	caps := NewCapGuard(5, 0, 0)
 	in := pacerInput(srv.URL, caps, nil)
 	cfg := pacedStageConfig{TargetRate: 200, MaxTokens: 16, Prompt: "hi", Duration: 2 * time.Second, MaxInFlight: 256}
 
@@ -151,5 +151,36 @@ func TestPacer_InFlightCap(t *testing.T) {
 	}
 	if res.Dispatched > 40 {
 		t.Fatalf("在途封顶失效：派发 %d 远超背压上界（期望 ≲ 20）", res.Dispatched)
+	}
+}
+
+// 热身：排定时刻落在档前段热身窗口内的样本标 warmup（不参与判定与指标），之后的不标
+func TestPacer_WarmupMarksEarlySamples(t *testing.T) {
+	srv, _ := sseChatServer(t, 0, nil)
+	in := pacerInput(srv.URL, nil, nil)
+	cfg := pacedStageConfig{TargetRate: 50, MaxTokens: 16, Prompt: "hi", Duration: 400 * time.Millisecond, Warmup: 200 * time.Millisecond, MaxInFlight: 256}
+
+	res, err := runPacedStage(context.Background(), in, 0, "r50", cfg, nil)
+	if err != nil {
+		t.Fatalf("runPacedStage error: %v", err)
+	}
+	stageStart := res.Samples[0].DispatchedAt // tick0 即档起点
+	var warm, judged int
+	for _, s := range res.Samples {
+		inWarmup := s.DispatchedAt.Sub(stageStart) < cfg.Warmup
+		if s.Warmup != inWarmup {
+			t.Fatalf("seq %d 排定于 +%v，warmup=%v 与热身窗口 %v 不符", s.Seq, s.DispatchedAt.Sub(stageStart), s.Warmup, cfg.Warmup)
+		}
+		if s.Warmup {
+			warm++
+		} else {
+			judged++
+		}
+	}
+	if warm == 0 || judged == 0 {
+		t.Fatalf("热身 %d 条、判定 %d 条，两段都应有样本", warm, judged)
+	}
+	if res.MeasuredSec <= 0 || res.MeasuredSec >= res.DurationSec {
+		t.Errorf("MeasuredSec=%v 应为发压窗口扣掉热身后的时长（DurationSec=%v）", res.MeasuredSec, res.DurationSec)
 	}
 }

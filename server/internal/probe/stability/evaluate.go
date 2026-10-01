@@ -59,39 +59,50 @@ func measured(samples []Sample) []Sample {
 }
 
 // aggregate 把一组（已剔除预热的）样本聚合成 Metrics（延迟分位数 + 错误分类 + 吞吐）。
-// 延迟分位数只统计成功样本（失败无延迟）；吞吐按样本时间跨度确定性计算。
+// 延迟分位只统计成功且未命中缓存的样本（失败无延迟；缓存命中的延迟不代表渠道真实 prefill）；
+// 预算耗尽单独计数、不进错误率分母（是我们给的生成上限太小，不是渠道故障）；吞吐按样本时间跨度确定性计算。
 func aggregate(samples []Sample) Metrics {
 	m := Metrics{Requests: len(samples), ByErrorClass: map[string]int{}}
-	var ttfb, ttft, total []int
+	var ttfb, ttfd, ttft, total []int
 	for _, s := range samples {
-		if s.Ok {
-			if s.TTFBms >= 0 {
-				ttfb = append(ttfb, s.TTFBms)
-			}
-			if s.TTFTms >= 0 {
-				ttft = append(ttft, s.TTFTms)
-			}
-			if s.TotalMs >= 0 {
-				total = append(total, s.TotalMs)
-			}
-		} else {
+		switch {
+		case s.ErrorClass == ErrBudgetExhausted:
+			m.BudgetExhausted++
+			m.ByErrorClass[s.ErrorClass]++
+		case !s.Ok:
 			m.Errors++
 			if s.ErrorClass != "" {
 				m.ByErrorClass[s.ErrorClass]++
 			}
+		case s.CachedTokens > 0:
+			m.CacheHits++
+		default:
+			ttfb = appendMeasured(ttfb, s.TTFBms)
+			ttfd = appendMeasured(ttfd, s.TTFDms)
+			ttft = appendMeasured(ttft, s.TTFTms)
+			total = appendMeasured(total, s.TotalMs)
 		}
 	}
-	if m.Requests > 0 {
-		m.ErrorRate = math.Round(float64(m.Errors)/float64(m.Requests)*10000) / 10000
+	if valid := m.Requests - m.BudgetExhausted; valid > 0 {
+		m.ErrorRate = math.Round(float64(m.Errors)/float64(valid)*10000) / 10000
 	}
 	if len(m.ByErrorClass) == 0 {
 		m.ByErrorClass = nil // 无错误时不落空对象
 	}
 	m.TTFBms = summarize(ttfb)
+	m.TTFDms = summarize(ttfd)
 	m.TTFTms = summarize(ttft)
 	m.TotalMs = summarize(total)
 	m.ThroughputRps, m.TokensPerSec = throughput(samples)
 	return m
+}
+
+// appendMeasured 只收测到的值（<0 = 没测到）
+func appendMeasured(v []int, ms int) []int {
+	if ms < 0 {
+		return v
+	}
+	return append(v, ms)
 }
 
 // throughput 按成功样本的时间跨度算吞吐：请求/秒 与 生成 token/秒。
@@ -148,10 +159,9 @@ func evaluateOverall(probeID string, samples []Sample) StageMetrics {
 	return StageMetrics{Probe: probeID, Stage: StageOverall, StageIndex: StageOverallIndex, Metrics: m}
 }
 
-// evaluatePacedStage 开环速率档评估：聚合样本 + 标注目标/达成到达率、限速判定与限速头。
-// 开环无预热概念，全部样本计入。
+// evaluatePacedStage 开环速率档评估：聚合判定段样本（剔除档前段热身）+ 标注目标/达成到达率、限速判定与限速头。
 func evaluatePacedStage(probeID, stage string, stageIndex int, targetRate, achievedRate float64, rateLimited bool, rateHeaders map[string]string, samples []Sample) StageMetrics {
-	m := aggregate(samples)
+	m := aggregate(measured(samples))
 	m.TargetRate = math.Round(targetRate*100) / 100
 	m.AchievedRate = achievedRate
 	m.RateLimited = rateLimited
@@ -159,15 +169,26 @@ func evaluatePacedStage(probeID, stage string, stageIndex int, targetRate, achie
 	return StageMetrics{Probe: probeID, Stage: stage, StageIndex: stageIndex, Metrics: m}
 }
 
-// evaluateRpmOverall RPM probe 的 __overall__ 行：收敛的可持续 RPM 边界 + 是否触顶护栏 + 限速头快照。
-func evaluateRpmOverall(probeID string, samples []Sample, convergedRpm float64, reachedCap bool, rateHeaders map[string]string) StageMetrics {
-	m := aggregate(samples)
-	m.ThroughputRps = 0 // 跨档混合吞吐无意义
-	m.TokensPerSec = 0
-	m.ConvergedRpm = math.Round(convergedRpm*100) / 100
-	m.ReachedCap = reachedCap
-	m.RateLimitHeaders = rateHeaders
+// evaluateRpmOverall RPM probe 的 __overall__ 行：收敛的可持续 RPM 边界 + 是否触顶护栏/被截断 + 限速头快照。
+func evaluateRpmOverall(probeID string, samples []Sample, b boundary, maxRate float64, truncatedBy string, rateHeaders map[string]string) StageMetrics {
+	m := evaluateBoundaryOverall(samples, b, maxRate, truncatedBy, rateHeaders)
+	m.ConvergedRpm = math.Round(b.lo*60*100) / 100
 	return StageMetrics{Probe: probeID, Stage: StageOverall, StageIndex: StageOverallIndex, Metrics: m}
+}
+
+// evaluateBoundaryOverall RPM/TPM 共用的 overall 口径：跨档混合吞吐无意义置零；
+// 触顶 = 一路升到护栏顶都没限速且没被截断（被截断时 lo 没跑到顶，不能说「≥ 护栏」）。
+func evaluateBoundaryOverall(samples []Sample, b boundary, maxRate float64, truncatedBy string, rateHeaders map[string]string) Metrics {
+	m := aggregate(samples)
+	m.ThroughputRps = 0
+	m.TokensPerSec = 0
+	m.ReachedCap = !b.haveHi && !b.truncated && b.lo >= maxRate-1e-9
+	m.Truncated = b.truncated
+	if b.truncated {
+		m.TruncatedBy = truncatedBy
+	}
+	m.RateLimitHeaders = rateHeaders
+	return m
 }
 
 // evaluateTpmStage 开环 token 速率档评估：在开环请求档基础上叠加目标/实测 token 到达率标注。
@@ -179,13 +200,9 @@ func evaluateTpmStage(probeID, stage string, stageIndex int, targetRate, achieve
 	return sm
 }
 
-// evaluateTpmOverall TPM probe 的 __overall__ 行：收敛的可持续 TPM 边界（token/min）+ 是否触顶护栏 + 限速头。
-func evaluateTpmOverall(probeID string, samples []Sample, convergedTpm float64, reachedCap bool, rateHeaders map[string]string) StageMetrics {
-	m := aggregate(samples)
-	m.ThroughputRps = 0 // 跨档混合吞吐无意义
-	m.TokensPerSec = 0
-	m.ConvergedTpm = math.Round(convergedTpm*100) / 100
-	m.ReachedCap = reachedCap
-	m.RateLimitHeaders = rateHeaders
+// evaluateTpmOverall TPM probe 的 __overall__ 行：收敛的可持续 TPM 边界（token/min）+ 是否触顶护栏/被截断 + 限速头。
+func evaluateTpmOverall(probeID string, samples []Sample, b boundary, maxRate float64, truncatedBy string, rateHeaders map[string]string) StageMetrics {
+	m := evaluateBoundaryOverall(samples, b, maxRate, truncatedBy, rateHeaders)
+	m.ConvergedTpm = math.Round(b.lo*60*100) / 100
 	return StageMetrics{Probe: probeID, Stage: StageOverall, StageIndex: StageOverallIndex, Metrics: m}
 }

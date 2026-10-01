@@ -11,11 +11,14 @@ import (
 
 // pacedStageConfig 一档开环发压的配置。
 type pacedStageConfig struct {
-	TargetRate  float64       // 目标到达率 req/s
-	MaxTokens   int           // 每请求生成上限
-	Prompt      string        // 压测 prompt
-	Duration    time.Duration // 发压时长（排定新请求的窗口，尾部请求可越窗跑完）
-	MaxInFlight int           // 在途请求上限（防雪崩兜底）
+	TargetRate float64       // 目标到达率 req/s
+	MaxTokens  int           // 每请求生成上限
+	Prompt     string        // 压测 prompt
+	Duration   time.Duration // 发压时长（排定新请求的窗口，尾部请求可越窗跑完）
+	// Warmup 档前段热身时长：排定时刻落在其内的样本标 warmup，不参与限速判定与指标。
+	// 渠道限流器有记忆（上一档没清零的计数、令牌桶攒下的突发额度），前段的表现不代表稳态。
+	Warmup      time.Duration
+	MaxInFlight int // 在途请求上限（防雪崩兜底）
 }
 
 // pacedStageResult 一档开环发压的产出。
@@ -25,6 +28,7 @@ type pacedStageResult struct {
 	Stopped     bool              // 是否因全局硬闸提前收敛
 	RateHeaders map[string]string // 最近一次响应携带的限速头快照
 	DurationSec float64           // 实际发压窗口时长（算 achievedRate）
+	MeasuredSec float64           // 发压窗口扣掉热身后的时长（算判定段的 token 吞吐）
 }
 
 // runPacedStage 以恒定到达率 cfg.TargetRate 开环发压 cfg.Duration 时长。
@@ -78,7 +82,7 @@ func runPacedStage(ctx context.Context, in RunInput, stageIndex int, stage strin
 		default:
 			return true // 在途满：跳过本 tick，继续排期
 		}
-		if in.Caps != nil && (in.Caps.TokensExceeded() || !in.Caps.Reserve()) {
+		if !in.Caps.Reserve() {
 			<-inflight // 释放刚占的在途槽
 			stopped = true
 			return false
@@ -98,7 +102,8 @@ func runPacedStage(ctx context.Context, in RunInput, stageIndex int, stage strin
 			if in.Caps != nil && o.Usage.Ok {
 				in.Caps.AddTokens(o.Usage.Prompt + o.Usage.Completion)
 			}
-			s := sampleFrom(stage, stageIndex, sqN, false, sched, in.Codec.ID(), o)
+			warmup := sched.Sub(stageStart) < cfg.Warmup
+			s := sampleFrom(stage, stageIndex, sqN, warmup, sched, in.Codec.ID(), o)
 			hdrs := extractRateLimitHeaders(o.Header)
 
 			mu.Lock()
@@ -154,6 +159,7 @@ loop:
 		Stopped:     stopped,
 		RateHeaders: lastHeaders,
 		DurationSec: dispatchElapsed.Seconds(),
+		MeasuredSec: max(0, (dispatchElapsed - cfg.Warmup).Seconds()),
 	}, firstErr
 }
 

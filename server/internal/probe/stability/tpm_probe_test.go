@@ -30,7 +30,7 @@ func tpmInput(t *testing.T, baseURL string, tune func(*StabilityParams)) (RunInp
 		Params: params,
 		Client: &http.Client{},
 		Codec:  codec,
-		Caps:   NewCapGuard(params.MaxTotalRequests, params.MaxTotalTokens),
+		Caps:   NewCapGuard(params.MaxTotalRequests, params.MaxTotalTokens, 0),
 		Metric: func(_ context.Context, m StageMetrics) error {
 			mu.Lock()
 			*metrics = append(*metrics, m)

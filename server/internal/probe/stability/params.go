@@ -23,7 +23,7 @@ type StabilityParams struct {
 	// —— RPM 实测（开环，恒定到达率二分收敛速率边界）——
 	RpmStartRate      float64 `json:"rpmStartRate"`      // 起始到达率 req/s，默认 2
 	RpmMaxRate        float64 `json:"rpmMaxRate"`        // 探测速率护栏上限 req/s，默认 20
-	RpmStageSec       int     `json:"rpmStageSec"`       // 每档发压时长秒，默认 10
+	RpmStageSec       int     `json:"rpmStageSec"`       // 每档发压时长秒：前一半热身、只用后一半判限速（后一半≈对限流窗口的假设），默认 120
 	RpmMaxInFlight    int     `json:"rpmMaxInFlight"`    // 在途请求上限（防雪崩兜底），默认 128
 	RpmMaxTokens      int     `json:"rpmMaxTokens"`      // 每请求生成上限（RPM 只关心请求速率，取小），默认 16
 	RpmLimitThreshold float64 `json:"rpmLimitThreshold"` // 判定本档触发限速的 429 占比阈值，默认 0.1
@@ -32,15 +32,16 @@ type StabilityParams struct {
 	// —— TPM 实测（开环，恒定 token 到达率二分收敛 token 速率边界；输入+输出都计）——
 	TpmStartRate       float64 `json:"tpmStartRate"`       // 起始 token 到达率 token/s，默认 200
 	TpmMaxRate         float64 `json:"tpmMaxRate"`         // 探测 token 速率护栏上限 token/s，默认 2000
-	TpmStageSec        int     `json:"tpmStageSec"`        // 每档发压时长秒，默认 10
+	TpmStageSec        int     `json:"tpmStageSec"`        // 每档发压时长秒：前一半热身、只用后一半判限速（后一半≈对限流窗口的假设），默认 120
 	TpmMaxInFlight     int     `json:"tpmMaxInFlight"`     // 在途请求上限（防雪崩兜底），默认 128
 	TpmMaxTokensPerReq int     `json:"tpmMaxTokensPerReq"` // 每请求 max_tokens 砝码（顶格 prompt 保证打满输出），默认 256
 	TpmLimitThreshold  float64 `json:"tpmLimitThreshold"`  // 判定本档触发限速的 429 占比阈值，默认 0.1
 	TpmBinarySteps     int     `json:"tpmBinarySteps"`     // 找到限速档后二分细化步数，默认 4
 
 	// —— 全局硬闸（成本护栏，碰任一即停）——
-	MaxTotalRequests int `json:"maxTotalRequests"` // 累计请求上限，默认 2000
+	MaxTotalRequests int `json:"maxTotalRequests"` // 累计请求上限，默认 10000
 	MaxTotalTokens   int `json:"maxTotalTokens"`   // 累计 token 上限，默认 2_000_000
+	MaxDurationSec   int `json:"maxDurationSec"`   // 整任务墙钟上限秒（到点停派新请求，在途的跑完），默认 3600
 	RequestTimeoutMs int `json:"requestTimeoutMs"` // 单请求超时，默认 60000
 }
 
@@ -49,13 +50,14 @@ const (
 	DefaultRequestsPerStage = 20
 	DefaultWarmupPerStage   = 2
 	DefaultLadderMaxTokens  = 64
-	DefaultMaxTotalRequests = 2000
+	DefaultMaxTotalRequests = 10000
 	DefaultMaxTotalTokens   = 2_000_000
+	DefaultMaxDurationSec   = 3600
 	DefaultRequestTimeoutMs = 60000
 
 	DefaultRpmStartRate      = 2.0
 	DefaultRpmMaxRate        = 20.0
-	DefaultRpmStageSec       = 10
+	DefaultRpmStageSec       = 120
 	DefaultRpmMaxInFlight    = 128
 	DefaultRpmMaxTokens      = 16
 	DefaultRpmLimitThreshold = 0.1
@@ -63,7 +65,7 @@ const (
 
 	DefaultTpmStartRate       = 200.0
 	DefaultTpmMaxRate         = 2000.0
-	DefaultTpmStageSec        = 10
+	DefaultTpmStageSec        = 120
 	DefaultTpmMaxInFlight     = 128
 	DefaultTpmMaxTokensPerReq = 256
 	DefaultTpmLimitThreshold  = 0.1
@@ -132,6 +134,9 @@ func (p *StabilityParams) ApplyDefaults() {
 	if p.MaxTotalTokens == 0 {
 		p.MaxTotalTokens = DefaultMaxTotalTokens
 	}
+	if p.MaxDurationSec == 0 {
+		p.MaxDurationSec = DefaultMaxDurationSec
+	}
 	if p.RequestTimeoutMs == 0 {
 		p.RequestTimeoutMs = DefaultRequestTimeoutMs
 	}
@@ -165,8 +170,8 @@ func (p StabilityParams) Validate() error {
 	if p.RpmMaxRate < p.RpmStartRate || p.RpmMaxRate > 1000 {
 		return errors.New("RPM 速率上限需 ≥ 起始速率且 ≤1000 req/s")
 	}
-	if p.RpmStageSec < 1 || p.RpmStageSec > 300 {
-		return errors.New("RPM 每档时长需 1-300s")
+	if p.RpmStageSec < 2 || p.RpmStageSec > 600 {
+		return errors.New("RPM 每档时长需 2-600s（前一半热身、后一半判定）")
 	}
 	if p.RpmMaxInFlight < 1 || p.RpmMaxInFlight > 4096 {
 		return errors.New("RPM 在途上限需 1-4096")
@@ -186,8 +191,8 @@ func (p StabilityParams) Validate() error {
 	if p.TpmMaxRate < p.TpmStartRate || p.TpmMaxRate > 1_000_000 {
 		return errors.New("TPM token 速率上限需 ≥ 起始速率且 ≤1000000 token/s")
 	}
-	if p.TpmStageSec < 1 || p.TpmStageSec > 300 {
-		return errors.New("TPM 每档时长需 1-300s")
+	if p.TpmStageSec < 2 || p.TpmStageSec > 600 {
+		return errors.New("TPM 每档时长需 2-600s（前一半热身、后一半判定）")
 	}
 	if p.TpmMaxInFlight < 1 || p.TpmMaxInFlight > 4096 {
 		return errors.New("TPM 在途上限需 1-4096")
@@ -206,6 +211,9 @@ func (p StabilityParams) Validate() error {
 	}
 	if p.MaxTotalTokens < 1 {
 		return errors.New("总 token 上限须为正")
+	}
+	if p.MaxDurationSec < 60 || p.MaxDurationSec > 7200 {
+		return errors.New("整任务时长上限需 60-7200s")
 	}
 	if p.RequestTimeoutMs < 1000 || p.RequestTimeoutMs > 600000 {
 		return errors.New("单请求超时需 1000-600000ms")

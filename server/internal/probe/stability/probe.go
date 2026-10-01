@@ -114,8 +114,15 @@ type Metrics struct {
 	ErrorRate float64 `json:"errorRate"`
 
 	TTFTms  *Percentiles `json:"ttftMs,omitempty"`
+	TTFDms  *Percentiles `json:"ttfdMs,omitempty"` // 首个增量（推理或正文）；非推理模型≈TTFT
 	TTFBms  *Percentiles `json:"ttfbMs,omitempty"`
 	TotalMs *Percentiles `json:"totalMs,omitempty"`
+
+	// BudgetExhausted 生成上限被推理耗尽的条数：不计入 Errors/ErrorRate（砝码不足非渠道故障），
+	// >0 即说明 TTFT 结论不可用、应调大生成上限
+	BudgetExhausted int `json:"budgetExhausted,omitempty"`
+	// CacheHits 输入命中缓存的成功条数：不进延迟分位（缓存命中的 TTFT 不代表渠道真实 prefill）
+	CacheHits int `json:"cacheHits,omitempty"`
 
 	ThroughputRps float64 `json:"throughputRps,omitempty"`
 	TokensPerSec  float64 `json:"tokensPerSec,omitempty"`
@@ -131,6 +138,10 @@ type Metrics struct {
 	RateLimited  bool    `json:"rateLimited,omitempty"`  // 档级：本档 429 占比是否判定为触发限速
 	ConvergedRpm float64 `json:"convergedRpm,omitempty"` // __overall__：收敛的可持续 RPM 边界（req/min）
 	ReachedCap   bool    `json:"reachedCap,omitempty"`   // __overall__：探到速率护栏顶仍未限速（真实边界≥护栏）
+	// Truncated __overall__：搜索被全局硬闸截断。未出现过限速档时收敛值只是下界（真实边界≥它），
+	// 出现过则二分未完成、精度不足；TruncatedBy 为先触发的那道闸（requests|tokens|duration）
+	Truncated   bool   `json:"truncated,omitempty"`
+	TruncatedBy string `json:"truncatedBy,omitempty"`
 
 	// —— TPM 开环 token 速率发现（仅 tpm_probe）——
 	TargetTokenRate   float64 `json:"targetTokenRate,omitempty"`   // 档级：目标 token 到达率 token/s
@@ -149,17 +160,26 @@ type StageMetrics struct {
 	Metrics    Metrics
 }
 
-// CapGuard 全局成本硬闸：跨 probe 累计请求数与 token 数，碰上限即令 probe 收敛停止。
-// 尽力而为上界（并发下可能略微超出被占用的那一批），非精确配额。
+// 全局硬闸触发原因（Metrics.TruncatedBy 取值）
+const (
+	CapRequests = "requests"
+	CapTokens   = "tokens"
+	CapDuration = "duration"
+)
+
+// CapGuard 全局成本硬闸：跨 probe 累计请求数、token 数并限定整任务墙钟时长，碰任一上限即令 probe 收敛停止。
+// 尽力而为上界（并发下可能略微超出被占用的那一批），非精确配额；墙钟到点只停派新请求，在途的跑完。
 type CapGuard struct {
-	maxReq int64
-	maxTok int64
-	reqs   int64 // atomic
-	toks   int64 // atomic
+	maxReq   int64
+	maxTok   int64
+	deadline time.Time // 零值 = 不限时长
+	reqs     int64     // atomic
+	toks     int64     // atomic
+	reason   atomic.Pointer[string]
 }
 
-// NewCapGuard 建硬闸；上限 <=0 视为不限（用 math.MaxInt64 兜底）。
-func NewCapGuard(maxReq, maxTok int) *CapGuard {
+// NewCapGuard 建硬闸，墙钟从此刻起算；上限 <=0 视为不限。
+func NewCapGuard(maxReq, maxTok int, maxDur time.Duration) *CapGuard {
 	big := int64(1) << 62
 	mr, mt := int64(maxReq), int64(maxTok)
 	if mr <= 0 {
@@ -168,15 +188,44 @@ func NewCapGuard(maxReq, maxTok int) *CapGuard {
 	if mt <= 0 {
 		mt = big
 	}
-	return &CapGuard{maxReq: mr, maxTok: mt}
+	c := &CapGuard{maxReq: mr, maxTok: mt}
+	if maxDur > 0 {
+		c.deadline = time.Now().Add(maxDur)
+	}
+	return c
 }
 
-// Reserve 占用一个请求配额；返回 false 表示已达请求上限，不应再发。
+// Reserve 占用一个请求配额；返回 false 表示已撞某道闸（时长/token/请求数），不应再发。
 func (c *CapGuard) Reserve() bool {
 	if c == nil {
 		return true
 	}
-	return atomic.AddInt64(&c.reqs, 1) <= c.maxReq
+	switch {
+	case !c.deadline.IsZero() && time.Now().After(c.deadline):
+		return c.trip(CapDuration)
+	case atomic.LoadInt64(&c.toks) > c.maxTok:
+		return c.trip(CapTokens)
+	case atomic.AddInt64(&c.reqs, 1) > c.maxReq:
+		return c.trip(CapRequests)
+	}
+	return true
+}
+
+// trip 记下首个触发原因（后续触发不覆盖），恒返回 false 供 Reserve 直接 return
+func (c *CapGuard) trip(reason string) bool {
+	c.reason.CompareAndSwap(nil, &reason)
+	return false
+}
+
+// Reason 首个触发的硬闸原因；未触发为空串
+func (c *CapGuard) Reason() string {
+	if c == nil {
+		return ""
+	}
+	if r := c.reason.Load(); r != nil {
+		return *r
+	}
+	return ""
 }
 
 // AddTokens 累加实际消耗 token
@@ -185,12 +234,4 @@ func (c *CapGuard) AddTokens(n int64) {
 		return
 	}
 	atomic.AddInt64(&c.toks, n)
-}
-
-// TokensExceeded 是否已超 token 上限
-func (c *CapGuard) TokensExceeded() bool {
-	if c == nil {
-		return false
-	}
-	return atomic.LoadInt64(&c.toks) > c.maxTok
 }
