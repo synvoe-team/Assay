@@ -618,7 +618,8 @@ function LadderView({
                 tickLine={false}
                 axisLine={false}
                 tickMargin={8}
-                label={{ value: t('stab.concurrency'), position: 'insideBottom', offset: -2, fontSize: 11 }}
+                height={44}
+                label={{ value: t('stab.concurrency'), position: 'insideBottom', offset: 0, fontSize: 11 }}
               />
               <YAxis width={44} tickLine={false} axisLine={false} tickMargin={4} />
               <ChartTooltip
@@ -727,7 +728,8 @@ function RpmView({
                 tickLine={false}
                 axisLine={false}
                 tickMargin={8}
-                label={{ value: t('stab.targetRate'), position: 'insideBottom', offset: -2, fontSize: 11 }}
+                height={44}
+                label={{ value: t('stab.targetRate'), position: 'insideBottom', offset: 0, fontSize: 11 }}
               />
               <YAxis width={44} tickLine={false} axisLine={false} tickMargin={4} unit="%" />
               <ChartTooltip content={<ChartTooltipContent valueFormatter={(v) => `${v}%`} />} />
@@ -948,7 +950,8 @@ function TpmView({
                 tickLine={false}
                 axisLine={false}
                 tickMargin={8}
-                label={{ value: t('stab.targetTokenRate'), position: 'insideBottom', offset: -2, fontSize: 11 }}
+                height={44}
+                label={{ value: t('stab.targetTokenRate'), position: 'insideBottom', offset: 0, fontSize: 11 }}
               />
               <YAxis width={44} tickLine={false} axisLine={false} tickMargin={4} unit="%" />
               <ChartTooltip content={<ChartTooltipContent valueFormatter={(v) => `${v}%`} />} />
