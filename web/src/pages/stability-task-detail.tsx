@@ -1,6 +1,6 @@
 import { Fragment, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, FileJson, Loader2, RotateCcw, X } from 'lucide-react'
+import { ArrowLeft, FileJson, Loader2, RotateCcw, TriangleAlert, X } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router'
 import { CartesianGrid, Line, LineChart, ReferenceLine, XAxis, YAxis } from 'recharts'
 import { errText } from '@/components/channel-form-dialog'
@@ -29,6 +29,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Progress } from '@/components/ui/progress'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   Table,
   TableBody,
@@ -47,6 +48,7 @@ import {
   type StabilityTask,
 } from '@/lib/api'
 import { type DictKey, useI18n } from '@/lib/i18n'
+import { cn } from '@/lib/utils'
 
 const OVERALL_STAGE = '__overall__'
 
@@ -55,6 +57,50 @@ const CHART_CONFIG: ChartConfig = {
   p50: { label: 'p50', color: '#2563eb' },
   p95: { label: 'p95', color: '#d97706' },
   p99: { label: 'p99', color: '#dc2626' },
+  ttfdP50: { label: 'TTFD p50', color: '#7c3aed' },
+}
+
+// hasReasoningGap 推理模型的首增量（思考开始）明显早于首正文：只有这时才单列 TTFD，
+// 非推理模型两者相等，多画一条只是噪音
+function hasReasoningGap(stages: StabilityStageMetric[]): boolean {
+  return stages.some(
+    (s) => s.metrics.ttfdMs != null && s.metrics.ttftMs != null && s.metrics.ttfdMs.p50 < s.metrics.ttftMs.p50,
+  )
+}
+
+// boundaryState RPM/TPM 收敛值的可信度：触顶护栏或「被截断且从没见过限速档」时只是下界（显示 ≥），
+// 截断但已见过限速档则二分未完成
+function boundaryState(stages: StabilityStageMetric[], overall?: StabilityStageMetric) {
+  const m = overall?.metrics
+  const sawLimited = stages.some((s) => s.metrics.rateLimited)
+  const truncated = m?.truncated ?? false
+  const reachedCap = m?.reachedCap ?? false
+  return {
+    lowerBound: reachedCap || (truncated && !sawLimited),
+    reachedCap,
+    truncated,
+    sawLimited,
+    truncatedBy: m?.truncatedBy,
+  }
+}
+
+// BoundaryNotes 收敛值旁的琥珀色说明：触顶护栏 / 被硬闸截断（下界或二分未完成）
+function BoundaryNotes({ state }: { state: ReturnType<typeof boundaryState> }) {
+  const { t } = useI18n()
+  return (
+    <>
+      {state.reachedCap && (
+        <span className="text-xs text-amber-600 dark:text-amber-400">· {t('stab.reachedCapNote')}</span>
+      )}
+      {state.truncated && (
+        <span className="text-xs text-amber-600 dark:text-amber-400">
+          · {t('stab.truncated')}
+          {state.truncatedBy && `（${t(`stab.capBy.${state.truncatedBy}` as DictKey)}）`}：
+          {t(state.sawLimited ? 'stab.truncatedBinaryNote' : 'stab.truncatedLowerNote')}
+        </span>
+      )}
+    </>
+  )
 }
 
 function formatDuration(ms: number): string {
@@ -321,9 +367,17 @@ function ProbeSection({
   const isRpm =
     !isTpm &&
     (overall?.metrics.convergedRpm != null || stages.some((s) => s.metrics.targetRate != null))
+  const { t } = useI18n()
+  const budgetExhausted = overall?.metrics.budgetExhausted ?? 0
   return (
     <div className="grid gap-4">
       <p className="text-sm font-medium">{name}</p>
+      {budgetExhausted > 0 && (
+        <p className="flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+          {t('stab.budgetExhaustedBanner')}
+        </p>
+      )}
       {isTpm ? (
         <TpmView stages={stages} overall={overall} />
       ) : isRpm ? (
@@ -332,6 +386,11 @@ function ProbeSection({
         <LadderView stages={stages} overall={overall} />
       )}
       <ErrorClassBadges overall={overall} />
+      {(overall?.metrics.cacheHits ?? 0) > 0 && (
+        <p className="text-xs text-muted-foreground">
+          {t('stab.cacheHitsNote')}：{overall!.metrics.cacheHits}
+        </p>
+      )}
     </div>
   )
 }
@@ -346,6 +405,7 @@ function LadderView({
 }) {
   const { t } = useI18n()
 
+  const showTtfd = hasReasoningGap(stages)
   // 折线数据：仅有 TTFT 分位数的档入图；x 轴用并发数（缺省回退档标识）
   const chartData = stages
     .filter((s) => s.metrics.ttftMs != null)
@@ -354,7 +414,9 @@ function LadderView({
       p50: s.metrics.ttftMs!.p50,
       p95: s.metrics.ttftMs!.p95,
       p99: s.metrics.ttftMs!.p99,
+      ttfdP50: s.metrics.ttfdMs?.p50,
     }))
+  const series = showTtfd ? (['ttfdP50', 'p50', 'p95', 'p99'] as const) : (['p50', 'p95', 'p99'] as const)
 
   return (
     <>
@@ -375,7 +437,7 @@ function LadderView({
               <ChartTooltip
                 content={<ChartTooltipContent valueFormatter={(v) => `${v} ms`} />}
               />
-              {(['p50', 'p95', 'p99'] as const).map((k) => (
+              {series.map((k) => (
                 <Line
                   key={k}
                   type="monotone"
@@ -401,6 +463,7 @@ function LadderView({
               <TableHead className="text-right">{t('stab.errorRate')}</TableHead>
               <TableHead className="text-right">{t('stab.throughput')}</TableHead>
               <TableHead className="text-right">{t('stab.tokensPerSec')}</TableHead>
+              {showTtfd && <TableHead className="text-right">{t('stab.ttfd')} p50</TableHead>}
               <TableHead className="text-right">{t('stab.ttft')} p50</TableHead>
               <TableHead className="text-right">p95</TableHead>
               <TableHead className="text-right">p99</TableHead>
@@ -408,10 +471,10 @@ function LadderView({
           </TableHeader>
           <TableBody>
             {stages.map((s) => (
-              <MetricRow key={s.stage} label={stageLabel(s)} m={s.metrics} />
+              <MetricRow key={s.stage} label={stageLabel(s)} m={s.metrics} showTtfd={showTtfd} />
             ))}
             {overall && (
-              <MetricRow key="__overall__" label={t('stab.overall')} m={overall.metrics} bold />
+              <MetricRow key="__overall__" label={t('stab.overall')} m={overall.metrics} showTtfd={showTtfd} bold />
             )}
           </TableBody>
         </Table>
@@ -442,7 +505,7 @@ function RpmView({
 
   const convergedRpm = overall?.metrics.convergedRpm
   const boundaryRps = convergedRpm != null ? convergedRpm / 60 : undefined
-  const reachedCap = overall?.metrics.reachedCap ?? false
+  const bstate = boundaryState(stages, overall)
   const headerEntries = Object.entries(overall?.metrics.rateLimitHeaders ?? {})
 
   const sortedStages = [...stages].sort(
@@ -454,16 +517,12 @@ function RpmView({
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <span className="text-xs text-muted-foreground">{t('stab.convergedRpm')}</span>
         <span className="text-lg font-semibold tabular-nums">
-          {convergedRpm != null ? Math.round(convergedRpm) : '—'}
+          {convergedRpm != null ? `${bstate.lowerBound ? '≥ ' : ''}${Math.round(convergedRpm)}` : '—'}
         </span>
         {boundaryRps != null && (
           <span className="text-xs text-muted-foreground">RPM ≈ {num(boundaryRps)} req/s</span>
         )}
-        {reachedCap && (
-          <span className="text-xs text-amber-600 dark:text-amber-400">
-            · {t('stab.reachedCapNote')}
-          </span>
-        )}
+        <BoundaryNotes state={bstate} />
       </div>
 
       {chartData.length > 0 && (
@@ -483,7 +542,7 @@ function RpmView({
               />
               <YAxis width={44} tickLine={false} axisLine={false} tickMargin={4} unit="%" />
               <ChartTooltip content={<ChartTooltipContent valueFormatter={(v) => `${v}%`} />} />
-              {boundaryRps != null && !reachedCap && (
+              {boundaryRps != null && !bstate.lowerBound && (
                 <ReferenceLine
                   x={boundaryRps}
                   stroke="#16a34a"
@@ -549,6 +608,12 @@ function RpmView({
   )
 }
 
+// ERR_CLASS_TONE 错误分类徽章配色：预算耗尽是测试砝码问题（琥珀提醒），只有推理是渠道/模型问题（红）
+const ERR_CLASS_TONE: Record<string, string> = {
+  budget_exhausted: 'border-amber-500/40 text-amber-700 dark:text-amber-300',
+  reasoning_only: 'border-destructive/40 text-destructive',
+}
+
 // ErrorClassBadges 错误分类徽章：两类视图共用（源自 __overall__ 的 byErrorClass）
 function ErrorClassBadges({ overall }: { overall?: StabilityStageMetric }) {
   const { t } = useI18n()
@@ -557,16 +622,36 @@ function ErrorClassBadges({ overall }: { overall?: StabilityStageMetric }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
       <span className="text-xs text-muted-foreground">{t('stab.byErrorClass')}：</span>
-      {errorClasses.map(([cls, n]) => (
-        <Badge key={cls} variant="outline" className="font-normal">
-          {t(`errClass.${cls}` as DictKey)} · {n}
-        </Badge>
-      ))}
+      {errorClasses.map(([cls, n]) => {
+        const badge = (
+          <Badge key={cls} variant="outline" className={cn('font-normal', ERR_CLASS_TONE[cls])}>
+            {t(`errClass.${cls}` as DictKey)} · {n}
+          </Badge>
+        )
+        return cls === 'budget_exhausted' ? (
+          <Tooltip key={cls}>
+            <TooltipTrigger asChild>{badge}</TooltipTrigger>
+            <TooltipContent>{t('errClass.budget_exhausted.hint')}</TooltipContent>
+          </Tooltip>
+        ) : (
+          badge
+        )
+      })}
     </div>
   )
 }
 
-function MetricRow({ label, m, bold }: { label: string; m: StabilityMetrics; bold?: boolean }) {
+function MetricRow({
+  label,
+  m,
+  bold,
+  showTtfd,
+}: {
+  label: string
+  m: StabilityMetrics
+  bold?: boolean
+  showTtfd?: boolean
+}) {
   return (
     <TableRow className={bold ? 'font-medium' : undefined}>
       <TableCell>{label}</TableCell>
@@ -574,6 +659,7 @@ function MetricRow({ label, m, bold }: { label: string; m: StabilityMetrics; bol
       <TableCell className="text-right tabular-nums">{pct(m.errorRate)}</TableCell>
       <TableCell className="text-right tabular-nums">{num(m.throughputRps)}</TableCell>
       <TableCell className="text-right tabular-nums">{num(m.tokensPerSec)}</TableCell>
+      {showTtfd && <TableCell className="text-right tabular-nums">{ms(m.ttfdMs?.p50)}</TableCell>}
       <TableCell className="text-right tabular-nums">{ms(m.ttftMs?.p50)}</TableCell>
       <TableCell className="text-right tabular-nums">{ms(m.ttftMs?.p95)}</TableCell>
       <TableCell className="text-right tabular-nums">{ms(m.ttftMs?.p99)}</TableCell>
@@ -630,7 +716,7 @@ function TpmView({
 
   const convergedTpm = overall?.metrics.convergedTpm
   const boundaryTokenRate = convergedTpm != null ? convergedTpm / 60 : undefined
-  const reachedCap = overall?.metrics.reachedCap ?? false
+  const bstate = boundaryState(stages, overall)
   const headerEntries = Object.entries(overall?.metrics.rateLimitHeaders ?? {})
 
   const sortedStages = [...stages].sort(
@@ -642,16 +728,12 @@ function TpmView({
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <span className="text-xs text-muted-foreground">{t('stab.convergedTpm')}</span>
         <span className="text-lg font-semibold tabular-nums">
-          {convergedTpm != null ? Math.round(convergedTpm) : '—'}
+          {convergedTpm != null ? `${bstate.lowerBound ? '≥ ' : ''}${Math.round(convergedTpm)}` : '—'}
         </span>
         {boundaryTokenRate != null && (
           <span className="text-xs text-muted-foreground">TPM ≈ {num(boundaryTokenRate)} token/s</span>
         )}
-        {reachedCap && (
-          <span className="text-xs text-amber-600 dark:text-amber-400">
-            · {t('stab.reachedCapNote')}
-          </span>
-        )}
+        <BoundaryNotes state={bstate} />
       </div>
 
       {chartData.length > 0 && (
@@ -671,7 +753,7 @@ function TpmView({
               />
               <YAxis width={44} tickLine={false} axisLine={false} tickMargin={4} unit="%" />
               <ChartTooltip content={<ChartTooltipContent valueFormatter={(v) => `${v}%`} />} />
-              {boundaryTokenRate != null && !reachedCap && (
+              {boundaryTokenRate != null && !bstate.lowerBound && (
                 <ReferenceLine
                   x={boundaryTokenRate}
                   stroke="#16a34a"

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, ChevronLeft, ChevronRight, Loader2, Play, X } from 'lucide-react'
+import { ChevronDown, ChevronLeft, ChevronRight, Loader2, Play, TriangleAlert, X } from 'lucide-react'
 import { useNavigate } from 'react-router'
 import { errText } from '@/components/channel-form-dialog'
 import { TaskStatusBadge } from '@/components/quality-badges'
@@ -81,7 +81,7 @@ function estRpmRequests(start: number, max: number, stageSec: number, binaryStep
 }
 
 // TPM_INPUT_TOKENS_EST 每请求名义输入 token（换算「token 速率 → 请求速率」用），对齐后端 tpmInputTokensEst
-const TPM_INPUT_TOKENS_EST = 16
+const TPM_INPUT_TOKENS_EST = 24
 
 // estTpmRequests 复刻后端 TPM 最坏预估：token 速率各档按 reqRate=tokenRate/权重 换算请求速率后 ⌈reqRate×sec⌉+1 求和
 function estTpmRequests(
@@ -116,7 +116,7 @@ export default function StabilityPage() {
   // RPM 实测参数（开环恒定到达率爬坡 + 二分收敛）
   const [rpmStartRate, setRpmStartRate] = useState('2')
   const [rpmMaxRate, setRpmMaxRate] = useState('20')
-  const [rpmStageSec, setRpmStageSec] = useState('10')
+  const [rpmStageSec, setRpmStageSec] = useState('120')
   const [rpmMaxInFlight, setRpmMaxInFlight] = useState('128')
   const [rpmMaxTokens, setRpmMaxTokens] = useState('16')
   const [rpmLimitThreshold, setRpmLimitThreshold] = useState('0.1')
@@ -124,12 +124,12 @@ export default function StabilityPage() {
   // TPM 实测参数（开环恒定 token 到达率爬坡 + 二分收敛；输入+输出都计）
   const [tpmStartRate, setTpmStartRate] = useState('200')
   const [tpmMaxRate, setTpmMaxRate] = useState('2000')
-  const [tpmStageSec, setTpmStageSec] = useState('10')
+  const [tpmStageSec, setTpmStageSec] = useState('120')
   const [tpmMaxInFlight, setTpmMaxInFlight] = useState('128')
   const [tpmMaxTokensPerReq, setTpmMaxTokensPerReq] = useState('256')
   const [tpmLimitThreshold, setTpmLimitThreshold] = useState('0.1')
   const [tpmBinarySteps, setTpmBinarySteps] = useState('4')
-  const [maxTotalRequests, setMaxTotalRequests] = useState('2000')
+  const [maxTotalRequests, setMaxTotalRequests] = useState('10000')
   const [maxTotalTokens, setMaxTotalTokens] = useState('2000000')
   const [maxDurationSec, setMaxDurationSec] = useState('3600')
   const [requestTimeoutMs, setRequestTimeoutMs] = useState('60000')
@@ -222,7 +222,8 @@ export default function StabilityPage() {
   const rpmChecked = checked.includes('rpm_probe')
   const tpmChecked = checked.includes('tpm_probe')
 
-  // 最坏预估请求数：各 probe 按实选参数求和，再被总请求硬闸钳制。
+  // 最坏预估请求数：各 probe 按实选参数求和。不再被总请求硬闸钳制后展示——
+  // 钳制会把「超上限、会被截断」藏起来；超出时单独告警。
   // 三 probe 都有精确公式（阶梯 / RPM 爬坡+二分 / TPM token 速率爬坡+二分）。
   const estPerProbe = (p: StabilityProbeInfo): number => {
     if (p.id === 'concurrency_ladder') return ladderNums.length * (rps + warmup)
@@ -236,10 +237,20 @@ export default function StabilityPage() {
     if (p.id === 'tpm_probe') return tpmMaxTok
     return maxTok
   }
-  const estRequestsRaw = checkedProbes.reduce((sum, p) => sum + estPerProbe(p), 0)
-  const estRequests = Math.min(estRequestsRaw, totalReqCap || estRequestsRaw)
+  const estRequests = checkedProbes.reduce((sum, p) => sum + estPerProbe(p), 0)
+  const overRequestCap = totalReqCap > 0 && estRequests > totalReqCap
+  // RPM/TPM 最长耗时 = 最坏档数（爬坡档 + 二分步数）× 每档时长；阶梯取决于渠道延迟，不计入
+  const pacedSec = (start: number, max: number, steps: number, sec: number) =>
+    (rampRates(start, max).length + steps) * sec
+  const estPacedSec =
+    (rpmChecked ? pacedSec(rpmStart, rpmMax, rpmSteps, rpmSec) : 0) +
+    (tpmChecked ? pacedSec(tpmStart, tpmMax, tpmSteps, tpmSec) : 0)
+  const overDurationCap = estPacedSec > (Number(maxDurationSec) || 0)
   // 预估费用上界：只算输出侧（顶格 prompt 输入极小），各 probe 按自身 max_tokens 加权后受总 token 硬闸钳制
-  const estTokensRaw = checkedProbes.reduce((sum, p) => sum + estPerProbe(p) * maxTokForProbe(p), 0)
+  const estTokensRaw = checkedProbes.reduce(
+    (sum, p) => sum + Math.min(estPerProbe(p), totalReqCap || Infinity) * maxTokForProbe(p),
+    0,
+  )
   const estTokens = Math.min(estTokensRaw, totalTokCap || estTokensRaw)
   const estCost =
     model?.outputPrice != null ? (estTokens * model.outputPrice) / 1_000_000 : null
@@ -248,8 +259,8 @@ export default function StabilityPage() {
     ladderNums.length > 0 &&
     rps >= 1 &&
     maxTok >= 1 &&
-    (!rpmChecked || (rpmStart >= 0.1 && rpmMax >= rpmStart && rpmSec >= 1 && rpmMaxTok >= 1)) &&
-    (!tpmChecked || (tpmStart >= 1 && tpmMax >= tpmStart && tpmSec >= 1 && tpmMaxTok >= 1))
+    (!rpmChecked || (rpmStart >= 0.1 && rpmMax >= rpmStart && rpmSec >= 2 && rpmMaxTok >= 1)) &&
+    (!tpmChecked || (tpmStart >= 1 && tpmMax >= tpmStart && tpmSec >= 2 && tpmMaxTok >= 1))
 
   const submit = () => {
     create.mutate({
@@ -509,8 +520,8 @@ export default function StabilityPage() {
                       <Input
                         id="s-rpm-sec"
                         type="number"
-                        min={1}
-                        max={300}
+                        min={2}
+                        max={600}
                         className="w-36"
                         value={rpmStageSec}
                         onChange={(e) => setRpmStageSec(e.target.value)}
@@ -595,8 +606,8 @@ export default function StabilityPage() {
                       <Input
                         id="s-tpm-sec"
                         type="number"
-                        min={1}
-                        max={300}
+                        min={2}
+                        max={600}
                         className="w-36"
                         value={tpmStageSec}
                         onChange={(e) => setTpmStageSec(e.target.value)}
@@ -721,6 +732,11 @@ export default function StabilityPage() {
             <span className="text-sm text-muted-foreground">
               {t('quality.estRequests')}：{estRequests}
             </span>
+            {estPacedSec > 0 && (
+              <span className="text-sm text-muted-foreground">
+                {t('stab.estDuration')}：≈ {Math.ceil(estPacedSec / 60)} {t('stab.minutes')}
+              </span>
+            )}
             {estCost != null && (
               <span className="text-sm text-muted-foreground">
                 {t('stab.estCost')}：≤ {currencySymbol}
@@ -728,6 +744,12 @@ export default function StabilityPage() {
               </span>
             )}
           </div>
+          {(overRequestCap || overDurationCap) && (
+            <p className="mt-3 flex items-center gap-1.5 text-sm text-amber-600 dark:text-amber-400">
+              <TriangleAlert className="size-4 shrink-0" />
+              {overRequestCap ? t('stab.overRequestCap') : t('stab.overDurationCap')}
+            </p>
+          )}
         </CardContent>
       </Card>
 
