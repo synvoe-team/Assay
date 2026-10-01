@@ -14,13 +14,21 @@ import (
 	"github.com/Yukiho0287/assay/server/internal/db"
 )
 
-// NewSessionToken 生成会话 token：cookie 存随机值，库里只存 SHA-256 哈希。
-func NewSessionToken() (token string, hash []byte, err error) {
+// RandomToken 生成 32 字节密码学随机串（URL 安全），供会话 token 与 OAuth state 共用。
+func RandomToken() (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		return "", nil, fmt.Errorf("生成会话 token: %w", err)
+		return "", fmt.Errorf("生成随机 token: %w", err)
 	}
-	token = base64.RawURLEncoding.EncodeToString(raw)
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// NewSessionToken 生成会话 token：cookie 存随机值，库里只存 SHA-256 哈希。
+func NewSessionToken() (token string, hash []byte, err error) {
+	token, err = RandomToken()
+	if err != nil {
+		return "", nil, err
+	}
 	return token, HashToken(token), nil
 }
 
@@ -61,9 +69,10 @@ func EnsureAdmin(ctx context.Context, q *db.Queries, log *slog.Logger, envPasswo
 	if err != nil {
 		return fmt.Errorf("查询内置 admin 角色: %w", err)
 	}
+	pwHash := string(hash)
 	if _, err := q.CreateUser(ctx, db.CreateUserParams{
 		Username:     "admin",
-		PasswordHash: string(hash),
+		PasswordHash: &pwHash,
 		RoleID:       adminRole.ID,
 	}); err != nil {
 		return fmt.Errorf("创建初始管理员: %w", err)

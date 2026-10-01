@@ -218,6 +218,7 @@ function UsersSection({ selfId, roles }: { selfId: string; roles: Role[] }) {
               <TableRow>
                 <TableHead>{t('users.username')}</TableHead>
                 <TableHead>{t('users.role')}</TableHead>
+                <TableHead>{t('users.authSource')}</TableHead>
                 <TableHead>{t('users.createdAt')}</TableHead>
                 <TableHead className="w-24 text-right">{t('users.actions')}</TableHead>
               </TableRow>
@@ -227,6 +228,9 @@ function UsersSection({ selfId, roles }: { selfId: string; roles: Role[] }) {
                 <TableRow key={u.id}>
                   <TableCell className="font-medium">{u.username}</TableCell>
                   <TableCell>{u.roleName}</TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {u.authSource === 'feishu' ? t('users.authFeishu') : t('users.authPassword')}
+                  </TableCell>
                   <TableCell className="text-muted-foreground">
                     {new Date(u.createdAt).toLocaleString()}
                   </TableCell>
@@ -317,16 +321,20 @@ function UsersSection({ selfId, roles }: { selfId: string; roles: Role[] }) {
                   disabled={editing.id === selfId}
                 />
               </div>
-              <div className="grid gap-2">
-                <Label htmlFor="edit-password">{t('users.resetPassword')}</Label>
-                <Input
-                  id="edit-password"
-                  name="password"
-                  type="password"
-                  autoComplete="new-password"
-                  minLength={8}
-                />
-              </div>
+              {editing.authSource === 'feishu' ? (
+                <p className="text-sm text-muted-foreground">{t('users.feishuNoPassword')}</p>
+              ) : (
+                <div className="grid gap-2">
+                  <Label htmlFor="edit-password">{t('users.resetPassword')}</Label>
+                  <Input
+                    id="edit-password"
+                    name="password"
+                    type="password"
+                    autoComplete="new-password"
+                    minLength={8}
+                  />
+                </div>
+              )}
               {update.isError && <p className="text-sm text-destructive">{errText(update.error)}</p>}
               <DialogFooter>
                 <Button type="button" variant="outline" onClick={() => setEditing(null)}>

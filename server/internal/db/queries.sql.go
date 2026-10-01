@@ -318,7 +318,7 @@ returning id
 
 type CreateUserParams struct {
 	Username     string
-	PasswordHash string
+	PasswordHash *string
 	RoleID       uuid.UUID
 }
 
@@ -656,7 +656,7 @@ func (q *Queries) GetRoleByName(ctx context.Context, name string) (GetRoleByName
 }
 
 const getSessionUser = `-- name: GetSessionUser :one
-select u.id, u.username, r.name as role_name, r.permissions
+select u.id, u.username, u.display_name, u.avatar_url, r.name as role_name, r.permissions
 from sessions s
 join users u on u.id = s.user_id
 join roles r on r.id = u.role_id
@@ -666,6 +666,8 @@ where s.token_hash = $1 and s.expires_at > now()
 type GetSessionUserRow struct {
 	ID          uuid.UUID
 	Username    string
+	DisplayName *string
+	AvatarUrl   *string
 	RoleName    string
 	Permissions []byte
 }
@@ -676,6 +678,8 @@ func (q *Queries) GetSessionUser(ctx context.Context, tokenHash []byte) (GetSess
 	err := row.Scan(
 		&i.ID,
 		&i.Username,
+		&i.DisplayName,
+		&i.AvatarUrl,
 		&i.RoleName,
 		&i.Permissions,
 	)
@@ -734,18 +738,20 @@ func (q *Queries) GetTask(ctx context.Context, id uuid.UUID) (GetTaskRow, error)
 }
 
 const getUser = `-- name: GetUser :one
-select u.id, u.username, u.role_id, r.name as role_name, u.created_at
+select u.id, u.username, u.role_id, r.name as role_name,
+       (u.feishu_union_id is not null)::bool as from_feishu, u.created_at
 from users u
 join roles r on r.id = u.role_id
 where u.id = $1
 `
 
 type GetUserRow struct {
-	ID        uuid.UUID
-	Username  string
-	RoleID    uuid.UUID
-	RoleName  string
-	CreatedAt time.Time
+	ID         uuid.UUID
+	Username   string
+	RoleID     uuid.UUID
+	RoleName   string
+	FromFeishu bool
+	CreatedAt  time.Time
 }
 
 func (q *Queries) GetUser(ctx context.Context, id uuid.UUID) (GetUserRow, error) {
@@ -756,9 +762,21 @@ func (q *Queries) GetUser(ctx context.Context, id uuid.UUID) (GetUserRow, error)
 		&i.Username,
 		&i.RoleID,
 		&i.RoleName,
+		&i.FromFeishu,
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const getUserByFeishuUnionID = `-- name: GetUserByFeishuUnionID :one
+select u.id from users u where u.feishu_union_id = $1
+`
+
+func (q *Queries) GetUserByFeishuUnionID(ctx context.Context, feishuUnionID *string) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getUserByFeishuUnionID, feishuUnionID)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const getUserByUsername = `-- name: GetUserByUsername :one
@@ -770,7 +788,7 @@ where u.username = $1
 type GetUserByUsernameRow struct {
 	ID           uuid.UUID
 	Username     string
-	PasswordHash string
+	PasswordHash *string
 }
 
 func (q *Queries) GetUserByUsername(ctx context.Context, username string) (GetUserByUsernameRow, error) {
@@ -784,9 +802,9 @@ const getUserPasswordHash = `-- name: GetUserPasswordHash :one
 select password_hash from users where id = $1
 `
 
-func (q *Queries) GetUserPasswordHash(ctx context.Context, id uuid.UUID) (string, error) {
+func (q *Queries) GetUserPasswordHash(ctx context.Context, id uuid.UUID) (*string, error) {
 	row := q.db.QueryRow(ctx, getUserPasswordHash, id)
-	var password_hash string
+	var password_hash *string
 	err := row.Scan(&password_hash)
 	return password_hash, err
 }
@@ -1433,18 +1451,20 @@ func (q *Queries) ListTasks(ctx context.Context, arg ListTasksParams) ([]ListTas
 }
 
 const listUsers = `-- name: ListUsers :many
-select u.id, u.username, u.role_id, r.name as role_name, u.created_at
+select u.id, u.username, u.role_id, r.name as role_name,
+       (u.feishu_union_id is not null)::bool as from_feishu, u.created_at
 from users u
 join roles r on r.id = u.role_id
 order by u.created_at
 `
 
 type ListUsersRow struct {
-	ID        uuid.UUID
-	Username  string
-	RoleID    uuid.UUID
-	RoleName  string
-	CreatedAt time.Time
+	ID         uuid.UUID
+	Username   string
+	RoleID     uuid.UUID
+	RoleName   string
+	FromFeishu bool
+	CreatedAt  time.Time
 }
 
 func (q *Queries) ListUsers(ctx context.Context) ([]ListUsersRow, error) {
@@ -1461,6 +1481,7 @@ func (q *Queries) ListUsers(ctx context.Context) ([]ListUsersRow, error) {
 			&i.Username,
 			&i.RoleID,
 			&i.RoleName,
+			&i.FromFeishu,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -1485,6 +1506,27 @@ func (q *Queries) MarkTaskRunning(ctx context.Context, id uuid.UUID) (int64, err
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const refreshFeishuUserProfile = `-- name: RefreshFeishuUserProfile :exec
+update users set feishu_open_id = $2, display_name = $3, avatar_url = $4 where id = $1
+`
+
+type RefreshFeishuUserProfileParams struct {
+	ID           uuid.UUID
+	FeishuOpenID *string
+	DisplayName  *string
+	AvatarUrl    *string
+}
+
+func (q *Queries) RefreshFeishuUserProfile(ctx context.Context, arg RefreshFeishuUserProfileParams) error {
+	_, err := q.db.Exec(ctx, refreshFeishuUserProfile,
+		arg.ID,
+		arg.FeishuOpenID,
+		arg.DisplayName,
+		arg.AvatarUrl,
+	)
+	return err
 }
 
 const setTaskRiverJobID = `-- name: SetTaskRiverJobID :exec
@@ -1680,7 +1722,7 @@ update users set password_hash = $2 where id = $1
 
 type UpdateUserPasswordParams struct {
 	ID           uuid.UUID
-	PasswordHash string
+	PasswordHash *string
 }
 
 func (q *Queries) UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) (int64, error) {
@@ -1706,6 +1748,40 @@ func (q *Queries) UpdateUserRole(ctx context.Context, arg UpdateUserRoleParams) 
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const upsertFeishuUser = `-- name: UpsertFeishuUser :one
+insert into users (username, password_hash, role_id, feishu_union_id, feishu_open_id, display_name, avatar_url)
+values ($1, null, $2, $3, $4, $5, $6)
+on conflict (feishu_union_id) do update
+   set feishu_open_id = excluded.feishu_open_id,
+       display_name   = excluded.display_name,
+       avatar_url     = excluded.avatar_url
+returning id
+`
+
+type UpsertFeishuUserParams struct {
+	Username      string
+	RoleID        uuid.UUID
+	FeishuUnionID *string
+	FeishuOpenID  *string
+	DisplayName   *string
+	AvatarUrl     *string
+}
+
+// 首次登录自动建号；并发下同一 union_id 只会落一行，冲突分支只刷新资料（用户名保持原样）
+func (q *Queries) UpsertFeishuUser(ctx context.Context, arg UpsertFeishuUserParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, upsertFeishuUser,
+		arg.Username,
+		arg.RoleID,
+		arg.FeishuUnionID,
+		arg.FeishuOpenID,
+		arg.DisplayName,
+		arg.AvatarUrl,
+	)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const upsertStabilityMetric = `-- name: UpsertStabilityMetric :exec
@@ -1783,4 +1859,15 @@ func (q *Queries) UpsertTaskCaseResult(ctx context.Context, arg UpsertTaskCaseRe
 		arg.Attempts,
 	)
 	return err
+}
+
+const usernameExists = `-- name: UsernameExists :one
+select exists (select 1 from users where username = $1)
+`
+
+func (q *Queries) UsernameExists(ctx context.Context, username string) (bool, error) {
+	row := q.db.QueryRow(ctx, usernameExists, username)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }

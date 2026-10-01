@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Assay API
   description: LLM 渠道检测平台 API。本文件是前后端契约的唯一真相源（契约优先）。
-  version: 0.13.0
+  version: 0.14.0
 servers:
   - url: /api
 paths:
@@ -56,6 +56,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "403":
+          description: 本站已关闭密码登录
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /auth/logout:
     post:
       operationId: logout
@@ -96,6 +102,66 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /auth/methods:
+    get:
+      operationId: getAuthMethods
+      summary: 查询本站启用了哪些登录方式（登录页据此渲染，无需鉴权）
+      tags: [auth]
+      responses:
+        "200":
+          description: 可用登录方式
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthMethods"
+  /auth/feishu/authorize:
+    get:
+      operationId: feishuAuthorize
+      summary: 跳转飞书授权页（下发一次性 state Cookie 防 CSRF）
+      description: 浏览器直接导航到此地址，不要用 fetch 调用。
+      tags: [auth]
+      parameters:
+        - name: next
+          in: query
+          schema:
+            type: string
+          description: >
+            登录成功后要回到的站内路径（如 /quality/abc）。只接受以单个 / 开头的相对路径，
+            其余一律忽略并回落到首页——防开放重定向。
+      responses:
+        "302":
+          description: 重定向到飞书授权页
+        "503":
+          description: 未配置飞书登录
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /auth/feishu/callback:
+    get:
+      operationId: feishuCallback
+      summary: 飞书授权回调：换取用户身份、建立会话后跳回首页
+      description: 由飞书授权页重定向而来，地址须与开放平台「安全设置」登记的重定向 URL 完全一致。
+      tags: [auth]
+      parameters:
+        - name: code
+          in: query
+          schema:
+            type: string
+          description: 授权码，5 分钟有效且仅可用一次
+        - name: state
+          in: query
+          schema:
+            type: string
+          description: 发起授权时下发的一次性随机串
+        - name: error
+          in: query
+          schema:
+            type: string
+          description: 用户取消授权等失败场景由飞书回传
+      responses:
+        "302":
+          description: 成功跳首页并 Set-Cookie 建立会话；失败跳 /login 并在 query 带错误原因
   /users:
     get:
       operationId: listUsers
@@ -1170,13 +1236,35 @@ components:
           format: uuid
         username:
           type: string
+        displayName:
+          type: string
+          nullable: true
+          description: 飞书账号的姓名，密码账号为空
+        avatarUrl:
+          type: string
+          nullable: true
+          description: 飞书头像地址，密码账号为空
         role:
           type: string
         permissions:
           $ref: "#/components/schemas/PermissionMap"
+    AuthMethods:
+      description: 登录页据此决定渲染哪些入口
+      type: object
+      required: [password, feishu]
+      properties:
+        password:
+          type: boolean
+          description: 是否保留用户名密码登录（管理员兜底通道）
+        feishu:
+          type: boolean
+          description: 是否已配置飞书 OAuth 登录
+    AuthSource:
+      type: string
+      enum: [password, feishu]
     User:
       type: object
-      required: [id, username, roleId, roleName, createdAt]
+      required: [id, username, roleId, roleName, authSource, createdAt]
       properties:
         id:
           type: string
@@ -1188,6 +1276,8 @@ components:
           format: uuid
         roleName:
           type: string
+        authSource:
+          $ref: "#/components/schemas/AuthSource"
         createdAt:
           type: string
           format: date-time

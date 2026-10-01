@@ -12,9 +12,10 @@ export default defineConfig({
     },
   },
   server: {
-    // 开发环境 API 请求转发到 Go 后端
+    // 开发环境 API 请求转发到 Go 后端；
+    // 多 worktree 并行时后端端口会撞，用 ASSAY_API_PROXY 覆盖
     proxy: {
-      '/api': 'http://localhost:8080',
+      '/api': process.env.ASSAY_API_PROXY ?? 'http://localhost:8080',
     },
   },
 })

@@ -106,6 +106,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/methods": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 查询本站启用了哪些登录方式（登录页据此渲染，无需鉴权） */
+        get: operations["getAuthMethods"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/feishu/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 跳转飞书授权页（下发一次性 state Cookie 防 CSRF）
+         * @description 浏览器直接导航到此地址，不要用 fetch 调用。
+         */
+        get: operations["feishuAuthorize"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/feishu/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 飞书授权回调：换取用户身份、建立会话后跳回首页
+         * @description 由飞书授权页重定向而来，地址须与开放平台「安全设置」登记的重定向 URL 完全一致。
+         */
+        get: operations["feishuCallback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users": {
         parameters: {
             query?: never;
@@ -623,9 +680,22 @@ export interface components {
             /** Format: uuid */
             id: string;
             username: string;
+            /** @description 飞书账号的姓名，密码账号为空 */
+            displayName?: string | null;
+            /** @description 飞书头像地址，密码账号为空 */
+            avatarUrl?: string | null;
             role: string;
             permissions: components["schemas"]["PermissionMap"];
         };
+        /** @description 登录页据此决定渲染哪些入口 */
+        AuthMethods: {
+            /** @description 是否保留用户名密码登录（管理员兜底通道） */
+            password: boolean;
+            /** @description 是否已配置飞书 OAuth 登录 */
+            feishu: boolean;
+        };
+        /** @enum {string} */
+        AuthSource: "password" | "feishu";
         User: {
             /** Format: uuid */
             id: string;
@@ -633,6 +703,7 @@ export interface components {
             /** Format: uuid */
             roleId: string;
             roleName: string;
+            authSource: components["schemas"]["AuthSource"];
             /** Format: date-time */
             createdAt: string;
         };
@@ -1397,6 +1468,15 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
+            /** @description 本站已关闭密码登录 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
         };
     };
     logout: {
@@ -1460,6 +1540,81 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    getAuthMethods: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 可用登录方式 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthMethods"];
+                };
+            };
+        };
+    };
+    feishuAuthorize: {
+        parameters: {
+            query?: {
+                /** @description 登录成功后要回到的站内路径（如 /quality/abc）。只接受以单个 / 开头的相对路径， 其余一律忽略并回落到首页——防开放重定向。 */
+                next?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 重定向到飞书授权页 */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 未配置飞书登录 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    feishuCallback: {
+        parameters: {
+            query?: {
+                /** @description 授权码，5 分钟有效且仅可用一次 */
+                code?: string;
+                /** @description 发起授权时下发的一次性随机串 */
+                state?: string;
+                /** @description 用户取消授权等失败场景由飞书回传 */
+                error?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功跳首页并 Set-Cookie 建立会话；失败跳 /login 并在 query 带错误原因 */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     listUsers: {

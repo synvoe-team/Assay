@@ -15,6 +15,24 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for AuthSource.
+const (
+	Feishu   AuthSource = "feishu"
+	Password AuthSource = "password"
+)
+
+// Valid indicates whether the value is a known member of the AuthSource enum.
+func (e AuthSource) Valid() bool {
+	switch e {
+	case Feishu:
+		return true
+	case Password:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for CaseMode.
 const (
 	NonStream CaseMode = "non_stream"
@@ -188,6 +206,18 @@ func (e ExportStabilityTaskParamsFormat) Valid() bool {
 		return false
 	}
 }
+
+// AuthMethods 登录页据此决定渲染哪些入口
+type AuthMethods struct {
+	// Feishu 是否已配置飞书 OAuth 登录
+	Feishu bool `json:"feishu"`
+
+	// Password 是否保留用户名密码登录（管理员兜底通道）
+	Password bool `json:"password"`
+}
+
+// AuthSource defines model for AuthSource.
+type AuthSource string
 
 // CaseMode defines model for CaseMode.
 type CaseMode string
@@ -364,7 +394,12 @@ type Currency string
 
 // CurrentUser defines model for CurrentUser.
 type CurrentUser struct {
-	Id openapi_types.UUID `json:"id"`
+	// AvatarUrl 飞书头像地址，密码账号为空
+	AvatarUrl *string `json:"avatarUrl,omitempty"`
+
+	// DisplayName 飞书账号的姓名，密码账号为空
+	DisplayName *string            `json:"displayName,omitempty"`
+	Id          openapi_types.UUID `json:"id"`
 
 	// Permissions 粗粒度模块权限开关：控制对应页面与该模块全部接口的访问
 	Permissions PermissionMap `json:"permissions"`
@@ -958,11 +993,12 @@ type UpdateStatus struct {
 
 // User defines model for User.
 type User struct {
-	CreatedAt time.Time          `json:"createdAt"`
-	Id        openapi_types.UUID `json:"id"`
-	RoleId    openapi_types.UUID `json:"roleId"`
-	RoleName  string             `json:"roleName"`
-	Username  string             `json:"username"`
+	AuthSource AuthSource         `json:"authSource"`
+	CreatedAt  time.Time          `json:"createdAt"`
+	Id         openapi_types.UUID `json:"id"`
+	RoleId     openapi_types.UUID `json:"roleId"`
+	RoleName   string             `json:"roleName"`
+	Username   string             `json:"username"`
 }
 
 // UserCreate defines model for UserCreate.
@@ -1000,6 +1036,24 @@ type NotFound = Error
 
 // Unauthorized defines model for Unauthorized.
 type Unauthorized = Error
+
+// FeishuAuthorizeParams defines parameters for FeishuAuthorize.
+type FeishuAuthorizeParams struct {
+	// Next 登录成功后要回到的站内路径（如 /quality/abc）。只接受以单个 / 开头的相对路径， 其余一律忽略并回落到首页——防开放重定向。
+	Next *string `form:"next,omitempty" json:"next,omitempty"`
+}
+
+// FeishuCallbackParams defines parameters for FeishuCallback.
+type FeishuCallbackParams struct {
+	// Code 授权码，5 分钟有效且仅可用一次
+	Code *string `form:"code,omitempty" json:"code,omitempty"`
+
+	// State 发起授权时下发的一次性随机串
+	State *string `form:"state,omitempty" json:"state,omitempty"`
+
+	// Error 用户取消授权等失败场景由飞书回传
+	Error *string `form:"error,omitempty" json:"error,omitempty"`
+}
 
 // GetChannelConnectivityHistoryParams defines parameters for GetChannelConnectivityHistory.
 type GetChannelConnectivityHistoryParams struct {
@@ -1096,6 +1150,12 @@ type UpdateUserJSONRequestBody = UserUpdate
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// FeishuAuthorize 跳转飞书授权页（下发一次性 state Cookie 防 CSRF）
+	// (GET /auth/feishu/authorize)
+	FeishuAuthorize(w http.ResponseWriter, r *http.Request, params FeishuAuthorizeParams)
+	// FeishuCallback 飞书授权回调：换取用户身份、建立会话后跳回首页
+	// (GET /auth/feishu/callback)
+	FeishuCallback(w http.ResponseWriter, r *http.Request, params FeishuCallbackParams)
 	// Login 登录，成功后通过 HttpOnly Cookie 建立会话
 	// (POST /auth/login)
 	Login(w http.ResponseWriter, r *http.Request)
@@ -1105,6 +1165,9 @@ type ServerInterface interface {
 	// GetCurrentUser 获取当前登录用户（含角色与模块权限）
 	// (GET /auth/me)
 	GetCurrentUser(w http.ResponseWriter, r *http.Request)
+	// GetAuthMethods 查询本站启用了哪些登录方式（登录页据此渲染，无需鉴权）
+	// (GET /auth/methods)
+	GetAuthMethods(w http.ResponseWriter, r *http.Request)
 	// ChangeOwnPassword 修改自己的密码（需验证当前密码，成功后注销其他会话）
 	// (PUT /auth/password)
 	ChangeOwnPassword(w http.ResponseWriter, r *http.Request)
@@ -1239,6 +1302,98 @@ type ServerInterfaceWrapper struct {
 
 type MiddlewareFunc func(http.Handler) http.Handler
 
+// FeishuAuthorize operation middleware
+func (siw *ServerInterfaceWrapper) FeishuAuthorize(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params FeishuAuthorizeParams
+
+	// ------------- Optional query parameter "next" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "next", r.URL.Query(), &params.Next, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "next"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "next", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.FeishuAuthorize(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// FeishuCallback operation middleware
+func (siw *ServerInterfaceWrapper) FeishuCallback(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params FeishuCallbackParams
+
+	// ------------- Optional query parameter "code" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "code", r.URL.Query(), &params.Code, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "code"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "code", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "state" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "state", r.URL.Query(), &params.State, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "state"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "error" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "error", r.URL.Query(), &params.Error, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "error"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "error", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.FeishuCallback(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // Login operation middleware
 func (siw *ServerInterfaceWrapper) Login(w http.ResponseWriter, r *http.Request) {
 
@@ -1272,6 +1427,20 @@ func (siw *ServerInterfaceWrapper) GetCurrentUser(w http.ResponseWriter, r *http
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetCurrentUser(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetAuthMethods operation middleware
+func (siw *ServerInterfaceWrapper) GetAuthMethods(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetAuthMethods(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -2455,6 +2624,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/logout", wrapper.Logout)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/auth/me", wrapper.GetCurrentUser)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/auth/password", wrapper.ChangeOwnPassword)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/auth/methods", wrapper.GetAuthMethods)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/auth/feishu/authorize", wrapper.FeishuAuthorize)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/auth/feishu/callback", wrapper.FeishuCallback)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/users", wrapper.ListUsers)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/users", wrapper.CreateUser)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/users/{id}", wrapper.DeleteUser)

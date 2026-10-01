@@ -16,6 +16,7 @@ import (
 	"github.com/Yukiho0287/assay/server/internal/config"
 	"github.com/Yukiho0287/assay/server/internal/connectivity"
 	"github.com/Yukiho0287/assay/server/internal/db"
+	"github.com/Yukiho0287/assay/server/internal/feishu"
 	"github.com/Yukiho0287/assay/server/internal/httpserver"
 	"github.com/Yukiho0287/assay/server/internal/tasks"
 	"github.com/Yukiho0287/assay/server/internal/update"
@@ -103,6 +104,14 @@ func serve() {
 
 	gh := update.New(cfg.GitHubRepo, cfg.GitHubToken)
 
+	// 飞书登录：未配置则 fs 为 nil，登录页自动只显示密码入口
+	ao := httpserver.AuthOptions{LocalLogin: cfg.LocalLogin, CookieSecure: cfg.CookieSecure}
+	if cfg.FeishuEnabled() {
+		ao.Feishu = feishu.New(cfg.FeishuAppID, cfg.FeishuAppSecret, cfg.FeishuRedirectURL,
+			cfg.FeishuOpenBase, cfg.FeishuAccountsBase)
+		log.Info("飞书登录已启用", "app_id", cfg.FeishuAppID, "redirect_url", cfg.FeishuRedirectURL)
+	}
+
 	// 进程内任务 worker：Start 先清扫孤儿任务再取活；SIGTERM 时 ctx 取消触发软停
 	tq, err := tasks.New(pool, log)
 	if err != nil {
@@ -118,7 +127,7 @@ func serve() {
 	go connectivity.NewScheduler(pool, log).Run(ctx)
 
 	log.Info("assay 启动", "version", version.Version)
-	if err := httpserver.New(cfg.Addr, log, pool, gh, tq).Run(ctx, ln); err != nil {
+	if err := httpserver.New(cfg.Addr, log, pool, gh, tq, ao).Run(ctx, ln); err != nil {
 		log.Error("http server exited", "err", err)
 		os.Exit(1)
 	}

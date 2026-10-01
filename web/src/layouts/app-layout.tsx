@@ -59,7 +59,8 @@ export function AppLayout() {
   const [dark, setDark] = useState(isDark)
   const [updateOpen, setUpdateOpen] = useState(false)
 
-  // 路由守卫：未登录（/auth/me 401）一律重定向到登录页
+  // 路由守卫：未登录（/auth/me 401）重定向到登录页，并带上原本想去的路径，
+  // 登录完直接回那儿——开了自动跳转后深链接会很常见，不能一律甩回首页
   const { data: user, isPending, isError } = useQuery({
     queryKey: ['auth', 'me'],
     queryFn: authApi.me,
@@ -68,12 +69,15 @@ export function AppLayout() {
   })
 
   if (isPending) return null
-  if (isError || !user) return <Navigate to="/login" replace />
+  if (isError || !user) {
+    return <Navigate to={`/login?next=${encodeURIComponent(pathname + window.location.search)}`} replace />
+  }
 
   async function handleLogout() {
     await authApi.logout()
     queryClient.clear()
-    navigate('/login', { replace: true })
+    // manual=1 抑制自动跳转：否则刚退出就被静默登回来，「退出」等于没反应
+    navigate('/login?manual=1', { replace: true })
   }
 
   const requiredModule = pathModule[topPath(pathname)]

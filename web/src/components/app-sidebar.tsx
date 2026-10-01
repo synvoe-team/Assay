@@ -121,8 +121,13 @@ export function AppSidebar({ user, onLogout, onOpenUpdate }: AppSidebarProps) {
       </SidebarContent>
       <SidebarFooter>
         <div className="flex items-center gap-2 px-2 py-1.5 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0">
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium uppercase group-data-[collapsible=icon]:hidden">
-            {user.username.slice(0, 1)}
+          <div className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted text-sm font-medium uppercase group-data-[collapsible=icon]:hidden">
+            {/* 飞书账号用真实头像，密码账号退回首字母 */}
+            {user.avatarUrl ? (
+              <img src={user.avatarUrl} alt="" className="size-full object-cover" />
+            ) : (
+              user.username.slice(0, 1)
+            )}
           </div>
           <div className="grid min-w-0 flex-1 leading-tight group-data-[collapsible=icon]:hidden">
             <span className="truncate text-sm font-medium">{user.username}</span>

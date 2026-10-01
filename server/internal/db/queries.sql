@@ -7,7 +7,8 @@ values ($1, $2, $3)
 returning id;
 
 -- name: GetUser :one
-select u.id, u.username, u.role_id, r.name as role_name, u.created_at
+select u.id, u.username, u.role_id, r.name as role_name,
+       (u.feishu_union_id is not null)::bool as from_feishu, u.created_at
 from users u
 join roles r on r.id = u.role_id
 where u.id = $1;
@@ -21,7 +22,8 @@ where u.username = $1;
 select password_hash from users where id = $1;
 
 -- name: ListUsers :many
-select u.id, u.username, u.role_id, r.name as role_name, u.created_at
+select u.id, u.username, u.role_id, r.name as role_name,
+       (u.feishu_union_id is not null)::bool as from_feishu, u.created_at
 from users u
 join roles r on r.id = u.role_id
 order by u.created_at;
@@ -57,6 +59,25 @@ returning id, name, built_in, permissions;
 -- name: DeleteRole :execrows
 delete from roles where id = $1;
 
+-- name: GetUserByFeishuUnionID :one
+select u.id from users u where u.feishu_union_id = $1;
+
+-- name: UpsertFeishuUser :one
+-- 首次登录自动建号；并发下同一 union_id 只会落一行，冲突分支只刷新资料（用户名保持原样）
+insert into users (username, password_hash, role_id, feishu_union_id, feishu_open_id, display_name, avatar_url)
+values ($1, null, $2, $3, $4, $5, $6)
+on conflict (feishu_union_id) do update
+   set feishu_open_id = excluded.feishu_open_id,
+       display_name   = excluded.display_name,
+       avatar_url     = excluded.avatar_url
+returning id;
+
+-- name: RefreshFeishuUserProfile :exec
+update users set feishu_open_id = $2, display_name = $3, avatar_url = $4 where id = $1;
+
+-- name: UsernameExists :one
+select exists (select 1 from users where username = $1);
+
 -- name: CountUsersByRole :one
 select count(*) from users where role_id = $1;
 
@@ -65,7 +86,7 @@ insert into sessions (token_hash, user_id, expires_at)
 values ($1, $2, $3);
 
 -- name: GetSessionUser :one
-select u.id, u.username, r.name as role_name, r.permissions
+select u.id, u.username, u.display_name, u.avatar_url, r.name as role_name, r.permissions
 from sessions s
 join users u on u.id = s.user_id
 join roles r on r.id = u.role_id

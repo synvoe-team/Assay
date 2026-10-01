@@ -132,9 +132,13 @@ type TaskCaseResult struct {
 }
 
 type User struct {
-	ID           uuid.UUID
-	Username     string
-	PasswordHash string
-	CreatedAt    time.Time
-	RoleID       uuid.UUID
+	ID            uuid.UUID
+	Username      string
+	PasswordHash  *string
+	CreatedAt     time.Time
+	RoleID        uuid.UUID
+	FeishuUnionID *string
+	FeishuOpenID  *string
+	DisplayName   *string
+	AvatarUrl     *string
 }

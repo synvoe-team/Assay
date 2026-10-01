@@ -19,8 +19,19 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
+// authSource 认证来源由「有没有绑定飞书」推导，不额外存列
+func authSource(fromFeishu bool) api.AuthSource {
+	if fromFeishu {
+		return api.Feishu
+	}
+	return api.Password
+}
+
 func userToAPI(u db.GetUserRow) api.User {
-	return api.User{Id: u.ID, Username: u.Username, RoleId: u.RoleID, RoleName: u.RoleName, CreatedAt: u.CreatedAt}
+	return api.User{
+		Id: u.ID, Username: u.Username, RoleId: u.RoleID, RoleName: u.RoleName,
+		AuthSource: authSource(u.FromFeishu), CreatedAt: u.CreatedAt,
+	}
 }
 
 func (h *handlers) ListUsers(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +46,10 @@ func (h *handlers) ListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]api.User, 0, len(rows))
 	for _, u := range rows {
-		out = append(out, api.User{Id: u.ID, Username: u.Username, RoleId: u.RoleID, RoleName: u.RoleName, CreatedAt: u.CreatedAt})
+		out = append(out, api.User{
+			Id: u.ID, Username: u.Username, RoleId: u.RoleID, RoleName: u.RoleName,
+			AuthSource: authSource(u.FromFeishu), CreatedAt: u.CreatedAt,
+		})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -69,9 +83,10 @@ func (h *handlers) CreateUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, api.Error{Error: "服务内部错误"})
 		return
 	}
+	pwHash := string(hash)
 	id, err := h.q.CreateUser(r.Context(), db.CreateUserParams{
 		Username:     req.Username,
-		PasswordHash: string(hash),
+		PasswordHash: &pwHash,
 		RoleID:       req.RoleId,
 	})
 	if err != nil {
@@ -103,12 +118,18 @@ func (h *handlers) UpdateUser(w http.ResponseWriter, r *http.Request, id api.IdP
 		writeJSON(w, http.StatusBadRequest, api.Error{Error: "请求格式错误"})
 		return
 	}
-	if _, err := h.q.GetUser(r.Context(), id); err != nil {
+	target, err := h.q.GetUser(r.Context(), id)
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, api.Error{Error: "用户不存在"})
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, api.Error{Error: "服务内部错误"})
+		return
+	}
+	// 给飞书账号设密码等于开了一条绕过飞书的后门，直接拒绝
+	if req.Password != nil && target.FromFeishu {
+		writeJSON(w, http.StatusBadRequest, api.Error{Error: "飞书登录账号不支持设置密码"})
 		return
 	}
 
@@ -139,7 +160,8 @@ func (h *handlers) UpdateUser(w http.ResponseWriter, r *http.Request, id api.IdP
 			writeJSON(w, http.StatusInternalServerError, api.Error{Error: "服务内部错误"})
 			return
 		}
-		if _, err := h.q.UpdateUserPassword(r.Context(), db.UpdateUserPasswordParams{ID: id, PasswordHash: string(hash)}); err != nil {
+		hashStr := string(hash)
+		if _, err := h.q.UpdateUserPassword(r.Context(), db.UpdateUserPasswordParams{ID: id, PasswordHash: &hashStr}); err != nil {
 			h.log.Error("重置用户密码失败", "err", err)
 			writeJSON(w, http.StatusInternalServerError, api.Error{Error: "服务内部错误"})
 			return
