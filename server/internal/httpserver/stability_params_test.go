@@ -171,4 +171,16 @@ func TestPreflightFootnotes(t *testing.T) {
 	if got := preflightFootnotes(api.StabilityTaskParams{}, []api.StabilityStageMetric{{Stage: stability.StageOverall}}); len(got) != 0 {
 		t.Errorf("旧任务不应有预检脚注：%v", got)
 	}
+	// 思考不干预但模型在思考：提示 TTFT 含思考耗时并给出出路；没思考则不提
+	seen := 18
+	think := []api.StabilityStageMetric{{Stage: stability.StageOverall, Metrics: api.StabilityMetrics{
+		Preflight: &api.StabilityPreflight{Passed: true, Reasoning: true, UsageReported: true}, ReasoningSeen: &seen,
+	}}}
+	if notes := strings.Join(preflightFootnotes(api.StabilityTaskParams{}, think), "\n"); !strings.Contains(notes, "18 条") || !strings.Contains(notes, "自动探测") {
+		t.Errorf("不干预时应提示思考条数与出路：\n%s", notes)
+	}
+	think[0].Metrics.ReasoningSeen = nil
+	if got := preflightFootnotes(api.StabilityTaskParams{}, think); len(got) != 0 {
+		t.Errorf("不干预且没思考不该出思考脚注：%v", got)
+	}
 }

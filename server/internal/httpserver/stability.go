@@ -100,6 +100,9 @@ func thinkingNotes(params api.StabilityTaskParams, pf *api.StabilityPreflight, s
 		mode = *params.Workload.Thinking
 	}
 	if mode == api.StabilityThinkingDefault {
+		if seen > 0 {
+			return []string{fmt.Sprintf("思考未干预：%d 条正常应答出现推理，TTFT 含思考耗时；要测不含思考的首字延迟，可把「思考」设为「关闭 · 自动探测写法」重跑。", seen)}
+		}
 		return nil
 	}
 	tried := 0
