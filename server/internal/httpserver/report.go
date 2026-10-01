@@ -49,7 +49,7 @@ func (h *handlers) ExportQualityTask(w http.ResponseWriter, r *http.Request, id 
 	stem := fmt.Sprintf("assay-report-%s", task.ID.String()[:8])
 
 	switch params.Format {
-	case api.Junit:
+	case api.ExportQualityTaskParamsFormatJunit:
 		out, err := buildJUnit(task, rows, report)
 		if err != nil {
 			h.internalError(w, "渲染 JUnit 报告失败", err)
@@ -59,7 +59,7 @@ func (h *handlers) ExportQualityTask(w http.ResponseWriter, r *http.Request, id 
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", stem+".xml"))
 		w.Write([]byte(xml.Header))
 		w.Write(out)
-	case api.Json:
+	case api.ExportQualityTaskParamsFormatJson:
 		apiTask, err := taskToAPI(task)
 		if err != nil {
 			h.internalError(w, "任务数据损坏", err)

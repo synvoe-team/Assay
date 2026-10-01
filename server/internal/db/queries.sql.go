@@ -418,6 +418,25 @@ func (q *Queries) DeleteSession(ctx context.Context, tokenHash []byte) error {
 	return err
 }
 
+const deleteStabilityMetrics = `-- name: DeleteStabilityMetrics :exec
+delete from stability_metrics where task_id = $1
+`
+
+func (q *Queries) DeleteStabilityMetrics(ctx context.Context, taskID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteStabilityMetrics, taskID)
+	return err
+}
+
+const deleteStabilitySamples = `-- name: DeleteStabilitySamples :exec
+delete from stability_samples where task_id = $1
+`
+
+// 重试幂等：清掉上次中断留下的半截时序，整个任务从头重跑
+func (q *Queries) DeleteStabilitySamples(ctx context.Context, taskID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteStabilitySamples, taskID)
+	return err
+}
+
 const deleteTaskCaseResults = `-- name: DeleteTaskCaseResults :exec
 delete from task_case_results where task_id = $1
 `
@@ -823,6 +842,63 @@ func (q *Queries) InsertConnectivityResult(ctx context.Context, arg InsertConnec
 	return err
 }
 
+const insertStabilitySample = `-- name: InsertStabilitySample :exec
+insert into stability_samples
+    (task_id, probe, stage, stage_index, seq, protocol, dispatched_at,
+     ttfb_ms, ttfd_ms, ttft_ms, total_ms, ok, http_status, http_proto, error_class, error,
+     input_tokens, output_tokens, cached_tokens, warmup)
+values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+`
+
+type InsertStabilitySampleParams struct {
+	TaskID       uuid.UUID
+	Probe        string
+	Stage        string
+	StageIndex   int32
+	Seq          int32
+	Protocol     string
+	DispatchedAt time.Time
+	TtfbMs       pgtype.Int4
+	TtfdMs       pgtype.Int4
+	TtftMs       pgtype.Int4
+	TotalMs      pgtype.Int4
+	Ok           bool
+	HttpStatus   pgtype.Int4
+	HttpProto    *string
+	ErrorClass   *string
+	Error        *string
+	InputTokens  pgtype.Int4
+	OutputTokens pgtype.Int4
+	CachedTokens pgtype.Int4
+	Warmup       bool
+}
+
+func (q *Queries) InsertStabilitySample(ctx context.Context, arg InsertStabilitySampleParams) error {
+	_, err := q.db.Exec(ctx, insertStabilitySample,
+		arg.TaskID,
+		arg.Probe,
+		arg.Stage,
+		arg.StageIndex,
+		arg.Seq,
+		arg.Protocol,
+		arg.DispatchedAt,
+		arg.TtfbMs,
+		arg.TtfdMs,
+		arg.TtftMs,
+		arg.TotalMs,
+		arg.Ok,
+		arg.HttpStatus,
+		arg.HttpProto,
+		arg.ErrorClass,
+		arg.Error,
+		arg.InputTokens,
+		arg.OutputTokens,
+		arg.CachedTokens,
+		arg.Warmup,
+	)
+	return err
+}
+
 const listChannelModels = `-- name: ListChannelModels :many
 select id, name, input_price, output_price, cached_input_price, created_at
 from channel_models
@@ -1120,6 +1196,120 @@ func (q *Queries) ListRunningTasks(ctx context.Context) ([]ListRunningTasksRow, 
 	for rows.Next() {
 		var i ListRunningTasksRow
 		if err := rows.Scan(&i.ID, &i.RiverJobID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStabilityMetrics = `-- name: ListStabilityMetrics :many
+select probe, stage, stage_index, metrics, created_at
+from stability_metrics
+where task_id = $1
+order by probe, stage_index
+`
+
+type ListStabilityMetricsRow struct {
+	Probe      string
+	Stage      string
+	StageIndex int32
+	Metrics    []byte
+	CreatedAt  time.Time
+}
+
+// 详情/导出：按 probe、档序取回全部聚合点（__overall__ 的 stage_index=-1 排最后）
+func (q *Queries) ListStabilityMetrics(ctx context.Context, taskID uuid.UUID) ([]ListStabilityMetricsRow, error) {
+	rows, err := q.db.Query(ctx, listStabilityMetrics, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStabilityMetricsRow
+	for rows.Next() {
+		var i ListStabilityMetricsRow
+		if err := rows.Scan(
+			&i.Probe,
+			&i.Stage,
+			&i.StageIndex,
+			&i.Metrics,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStabilitySamples = `-- name: ListStabilitySamples :many
+select probe, stage, stage_index, seq, protocol, dispatched_at,
+       ttfb_ms, ttfd_ms, ttft_ms, total_ms, ok, http_status, http_proto, error_class, error,
+       input_tokens, output_tokens, cached_tokens, warmup
+from stability_samples
+where task_id = $1
+order by probe, stage_index, seq
+`
+
+type ListStabilitySamplesRow struct {
+	Probe        string
+	Stage        string
+	StageIndex   int32
+	Seq          int32
+	Protocol     string
+	DispatchedAt time.Time
+	TtfbMs       pgtype.Int4
+	TtfdMs       pgtype.Int4
+	TtftMs       pgtype.Int4
+	TotalMs      pgtype.Int4
+	Ok           bool
+	HttpStatus   pgtype.Int4
+	HttpProto    *string
+	ErrorClass   *string
+	Error        *string
+	InputTokens  pgtype.Int4
+	OutputTokens pgtype.Int4
+	CachedTokens pgtype.Int4
+	Warmup       bool
+}
+
+// 导出证据链：全量逐请求时序
+func (q *Queries) ListStabilitySamples(ctx context.Context, taskID uuid.UUID) ([]ListStabilitySamplesRow, error) {
+	rows, err := q.db.Query(ctx, listStabilitySamples, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStabilitySamplesRow
+	for rows.Next() {
+		var i ListStabilitySamplesRow
+		if err := rows.Scan(
+			&i.Probe,
+			&i.Stage,
+			&i.StageIndex,
+			&i.Seq,
+			&i.Protocol,
+			&i.DispatchedAt,
+			&i.TtfbMs,
+			&i.TtfdMs,
+			&i.TtftMs,
+			&i.TotalMs,
+			&i.Ok,
+			&i.HttpStatus,
+			&i.HttpProto,
+			&i.ErrorClass,
+			&i.Error,
+			&i.InputTokens,
+			&i.OutputTokens,
+			&i.CachedTokens,
+			&i.Warmup,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1604,6 +1794,35 @@ func (q *Queries) UpsertFeishuUser(ctx context.Context, arg UpsertFeishuUserPara
 	var id uuid.UUID
 	err := row.Scan(&id)
 	return id, err
+}
+
+const upsertStabilityMetric = `-- name: UpsertStabilityMetric :exec
+insert into stability_metrics (task_id, probe, stage, stage_index, metrics)
+values ($1, $2, $3, $4, $5)
+on conflict (task_id, probe, stage) do update set
+    stage_index = excluded.stage_index,
+    metrics     = excluded.metrics,
+    created_at  = now()
+`
+
+type UpsertStabilityMetricParams struct {
+	TaskID     uuid.UUID
+	Probe      string
+	Stage      string
+	StageIndex int32
+	Metrics    []byte
+}
+
+// 评估期聚合点落库（同任务重跑幂等覆盖）
+func (q *Queries) UpsertStabilityMetric(ctx context.Context, arg UpsertStabilityMetricParams) error {
+	_, err := q.db.Exec(ctx, upsertStabilityMetric,
+		arg.TaskID,
+		arg.Probe,
+		arg.Stage,
+		arg.StageIndex,
+		arg.Metrics,
+	)
+	return err
 }
 
 const upsertTaskCaseResult = `-- name: UpsertTaskCaseResult :exec

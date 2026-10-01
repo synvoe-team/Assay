@@ -15,6 +15,7 @@ import QualityPage from '@/pages/quality'
 import QualityTaskDetailPage from '@/pages/quality-task-detail'
 import SettingsPage from '@/pages/settings'
 import StabilityPage from '@/pages/stability'
+import StabilityTaskDetailPage from '@/pages/stability-task-detail'
 
 // 渲染前恢复持久化主题，避免暗色用户首屏闪白
 applyStoredTheme()
@@ -31,6 +32,7 @@ const router = createBrowserRouter([
       { path: 'quality', Component: QualityPage },
       { path: 'quality/:taskId', Component: QualityTaskDetailPage },
       { path: 'stability', Component: StabilityPage },
+      { path: 'stability/:taskId', Component: StabilityTaskDetailPage },
       { path: 'settings', Component: SettingsPage },
     ],
   },

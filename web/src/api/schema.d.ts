@@ -529,6 +529,126 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/stability/probes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 稳定性检测项注册表（需 stability 权限；产出性能指标，无评分检查点） */
+        get: operations["listStabilityProbes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/stability/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 稳定性检测任务历史（需 stability 权限；按创建时间倒序，可按状态/渠道筛选） */
+        get: operations["listStabilityTasks"];
+        put?: never;
+        /** 创建稳定性检测任务（需 stability 权限；创建时快照检测对象+协议，入队后由 worker 发压） */
+        post: operations["createStabilityTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/stability/tasks/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 稳定性任务详情（需 stability 权限；含参数快照） */
+        get: operations["getStabilityTask"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/stability/tasks/{id}/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 稳定性指标报告（需 stability 权限；档级+overall 聚合，仅终态任务可用） */
+        get: operations["getStabilityTaskMetrics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/stability/tasks/{id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 导出稳定性报告（需 stability 权限；json=证据链自足报告，含全量逐请求样本；仅终态任务可用） */
+        get: operations["exportStabilityTask"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/stability/tasks/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 取消稳定性任务（需 stability 权限；排队或运行中的任务可取消，运行中的中止在途请求） */
+        post: operations["cancelStabilityTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/stability/tasks/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 稳定性任务进度事件流（需 stability 权限；SSE，连接后先推当前快照，任务终态后关闭） */
+        get: operations["streamStabilityTaskEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -961,6 +1081,289 @@ export interface components {
         };
         Error: {
             error: string;
+        };
+        /** @description 稳定性检测项元数据（产出性能指标，无评分检查点） */
+        StabilityProbeInfo: {
+            /** @description 检测项唯一标识（如 concurrency_ladder） */
+            id: string;
+            name: string;
+            description: string;
+            /** @description 适用协议（空=全适用，前端展示为三协议皆可） */
+            protocols: components["schemas"]["Protocol"][];
+            /** @description 按默认参数的最坏预估请求数（前端据实选参数自行重算展示） */
+            estRequests: number;
+        };
+        /** @description 稳定性任务参数：实选协议 + 各 probe 档位 + 全局成本硬闸 */
+        StabilityTaskParams: {
+            /** @description 本任务实选协议（写入快照；须为渠道声明协议之一） */
+            protocol?: components["schemas"]["Protocol"];
+            /**
+             * @description 阶梯并发的并发档序列（闭环）
+             * @default [
+             *       1,
+             *       2,
+             *       4,
+             *       8,
+             *       16
+             *     ]
+             */
+            concurrencyLadder: number[];
+            /**
+             * @description 每档计入统计的请求数
+             * @default 20
+             */
+            requestsPerStage: number;
+            /**
+             * @description 每档预热请求数（评估时剔除，不计入指标）；缺省 0（不预热）
+             * @default 0
+             */
+            warmupPerStage: number;
+            /**
+             * @description 每请求生成上限（max_tokens 砝码，控制单请求耗时与成本）
+             * @default 64
+             */
+            ladderMaxTokens: number;
+            /**
+             * @description RPM 实测起始到达率（req/s，开环）
+             * @default 2
+             */
+            rpmStartRate: number;
+            /**
+             * @description RPM 探测速率护栏上限（req/s）；升到此仍不限速则报「边界≥上限」
+             * @default 20
+             */
+            rpmMaxRate: number;
+            /**
+             * @description RPM 每档发压时长（秒）；前一半为热身（消化渠道残留计数/突发额度），只用后一半判限速
+             * @default 120
+             */
+            rpmStageSec: number;
+            /**
+             * @description RPM 在途请求上限（防雪崩兜底）
+             * @default 128
+             */
+            rpmMaxInFlight: number;
+            /**
+             * @description RPM 每请求生成上限（只关心请求速率，取小）
+             * @default 16
+             */
+            rpmMaxTokens: number;
+            /**
+             * @description 判定某档触发限速的 429 占比阈值（0-1）
+             * @default 0.1
+             */
+            rpmLimitThreshold: number;
+            /**
+             * @description 找到限速档后二分细化真实边界的步数
+             * @default 4
+             */
+            rpmBinarySteps: number;
+            /**
+             * @description TPM 实测起始 token 到达率（token/s，开环；换算请求速率发压）
+             * @default 200
+             */
+            tpmStartRate: number;
+            /**
+             * @description TPM 探测 token 速率护栏上限（token/s）；升到此仍不限速则报「边界≥上限」
+             * @default 2000
+             */
+            tpmMaxRate: number;
+            /**
+             * @description TPM 每档发压时长（秒）；前一半为热身，只用后一半判限速
+             * @default 120
+             */
+            tpmStageSec: number;
+            /**
+             * @description TPM 在途请求上限（防雪崩兜底）
+             * @default 128
+             */
+            tpmMaxInFlight: number;
+            /**
+             * @description TPM 每请求 max_tokens 砝码（顶格数数 prompt 保证打满输出；输入+输出都计）
+             * @default 256
+             */
+            tpmMaxTokensPerReq: number;
+            /**
+             * @description 判定某档触发限速的 429 占比阈值（0-1）
+             * @default 0.1
+             */
+            tpmLimitThreshold: number;
+            /**
+             * @description 找到限速档后二分细化真实 token 速率边界的步数
+             * @default 4
+             */
+            tpmBinarySteps: number;
+            /**
+             * @description 全局请求硬闸；累计达到即收敛停止
+             * @default 10000
+             */
+            maxTotalRequests: number;
+            /**
+             * @description 全局 token 硬闸；累计达到即收敛停止
+             * @default 2000000
+             */
+            maxTotalTokens: number;
+            /**
+             * @description 整任务墙钟上限（秒）；到点停派新请求、在途的跑完，已出结果照常出报告并标截断
+             * @default 3600
+             */
+            maxDurationSec: number;
+            /**
+             * @description 单请求超时（毫秒）
+             * @default 60000
+             */
+            requestTimeoutMs: number;
+        };
+        StabilityTaskCreate: {
+            /** Format: uuid */
+            channelId: string;
+            /** Format: uuid */
+            modelEntryId: string;
+            /** @description 勾选的稳定性检测项 id 集合 */
+            probes: string[];
+            params: components["schemas"]["StabilityTaskParams"];
+        };
+        StabilityTask: {
+            /** Format: uuid */
+            id: string;
+            status: components["schemas"]["TaskStatus"];
+            target: components["schemas"]["TaskTarget"];
+            probes: string[];
+            /** @description 生效参数（缺省项已填入默认值） */
+            params: components["schemas"]["StabilityTaskParams"];
+            progressTotal: number;
+            progressDone: number;
+            error?: string;
+            createdBy?: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            startedAt?: string;
+            /** Format: date-time */
+            finishedAt?: string;
+        };
+        StabilityTaskList: {
+            items: components["schemas"]["StabilityTask"][];
+            total: number;
+        };
+        /** @description 一组延迟观测的分位数摘要（评估期确定性计算，单位毫秒） */
+        StabilityPercentiles: {
+            p50: number;
+            p95: number;
+            p99: number;
+            min: number;
+            max: number;
+            avg: number;
+        };
+        /** @description 一个（probe×档位）的指标集 */
+        StabilityMetrics: {
+            /** @description 计入统计的请求数（已剔除预热） */
+            requests: number;
+            errors: number;
+            errorRate: number;
+            ttftMs?: components["schemas"]["StabilityPercentiles"];
+            /** @description 首个非空增量（推理或正文）耗时分位；推理模型「开始干活」的时刻，非推理模型≈TTFT */
+            ttfdMs?: components["schemas"]["StabilityPercentiles"];
+            ttfbMs?: components["schemas"]["StabilityPercentiles"];
+            totalMs?: components["schemas"]["StabilityPercentiles"];
+            /** @description 生成上限被推理耗尽仍无正文的条数；不计入 errors/errorRate（砝码不足非渠道故障），>0 即 TTFT 结论不可用 */
+            budgetExhausted?: number;
+            /** @description 输入命中缓存的成功条数；不计入延迟分位 */
+            cacheHits?: number;
+            /** @description 达成吞吐（请求/秒，按样本时间窗计） */
+            throughputRps?: number;
+            /** @description 输出 token 吞吐（token/秒） */
+            tokensPerSec?: number;
+            /** @description 各错误分类计数 */
+            byErrorClass?: {
+                [key: string]: number;
+            };
+            /** @description 阶梯并发档的并发数（其它 probe 缺省） */
+            concurrency?: number;
+            /** @description 开环档目标到达率（req/s） */
+            targetRate?: number;
+            /** @description 开环档实际达成到达率（req/s，在途封顶会低于目标） */
+            achievedRate?: number;
+            /** @description 开环档 429 占比是否判定为触发限速 */
+            rateLimited?: boolean;
+            /** @description __overall__ RPM 收敛的可持续边界（请求/分钟） */
+            convergedRpm?: number;
+            /** @description __overall__ 探到速率护栏顶仍未限速（真实边界≥护栏） */
+            reachedCap?: boolean;
+            /** @description __overall__ RPM/TPM 搜索被全局硬闸截断；未出现限速档时收敛值只是下界，出现过则二分未完成 */
+            truncated?: boolean;
+            /**
+             * @description __overall__ 先触发的硬闸
+             * @enum {string}
+             */
+            truncatedBy?: "requests" | "tokens" | "duration";
+            /** @description TPM 开环档目标 token 到达率（token/s） */
+            targetTokenRate?: number;
+            /** @description TPM 开环档实测 token 吞吐（token/s，输入+输出都计） */
+            achievedTokenRate?: number;
+            /** @description __overall__ TPM 收敛的可持续边界（token/分钟） */
+            convergedTpm?: number;
+            /** @description 最近一次响应携带的限速头快照（x-ratelimit-*\/anthropic-ratelimit-*\/retry-after） */
+            rateLimitHeaders?: {
+                [key: string]: string;
+            };
+        };
+        /** @description 一档（或 __overall__ probe 级）的评估结果 */
+        StabilityStageMetric: {
+            probe: string;
+            /** @description 档位标识；__overall__ 为 probe 级汇总 */
+            stage: string;
+            /** @description 档序号；__overall__ 为 -1 */
+            stageIndex: number;
+            metrics: components["schemas"]["StabilityMetrics"];
+        };
+        /** @description 稳定性指标报告：档级 + overall 聚合，口径见 footnotes */
+        StabilityReport: {
+            /** Format: uuid */
+            taskId: string;
+            status: components["schemas"]["TaskStatus"];
+            protocol: components["schemas"]["Protocol"];
+            /** @description 任务非正常结束（failed/canceled），指标仅基于已采集样本 */
+            incomplete?: boolean;
+            stages: components["schemas"]["StabilityStageMetric"][];
+            /** @description 测量口径脚注（TTFT 起点、预热剔除、分位数算法等） */
+            footnotes?: string[];
+            /** Format: date-time */
+            generatedAt: string;
+        };
+        /** @description 一次压测请求的逐请求原始时序（证据链源；失败样本延迟/计量字段缺省） */
+        StabilitySample: {
+            probe: string;
+            stage: string;
+            stageIndex: number;
+            seq: number;
+            protocol: components["schemas"]["Protocol"];
+            /** Format: date-time */
+            dispatchedAt: string;
+            ok: boolean;
+            httpStatus?: number;
+            errorClass?: string;
+            error?: string;
+            /** @description 实际协商的协议版本（如 HTTP/1.1） */
+            httpProto?: string;
+            ttfbMs?: number;
+            /** @description 首个非空增量（推理或正文）耗时 */
+            ttfdMs?: number;
+            ttftMs?: number;
+            totalMs?: number;
+            inputTokens?: number;
+            outputTokens?: number;
+            /** @description 输入中命中缓存的 token 数 */
+            cachedTokens?: number;
+            warmup: boolean;
+        };
+        /** @description 证据链自足的 JSON 导出：任务快照 + 指标报告 + 全量逐请求样本 */
+        StabilityExport: {
+            tool: string;
+            version: string;
+            task: components["schemas"]["StabilityTask"];
+            report: components["schemas"]["StabilityReport"];
+            samples: components["schemas"]["StabilitySample"][];
         };
     };
     responses: {
@@ -2112,6 +2515,248 @@ export interface operations {
         };
     };
     streamQualityTaskEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description text/event-stream，每帧 data 为 TaskProgressEvent 的 JSON */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listStabilityProbes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 全部已注册稳定性检测项 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StabilityProbeInfo"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listStabilityTasks: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+                /** @description 按任务状态筛选；缺省不过滤 */
+                status?: components["schemas"]["TaskStatus"];
+                /** @description 按渠道筛选；缺省不过滤（渠道删除后其任务 channel_id 置空，仅在不过滤时可见） */
+                channelId?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 任务列表分页 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StabilityTaskList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createStabilityTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StabilityTaskCreate"];
+            };
+        };
+        responses: {
+            /** @description 任务已创建并入队 */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StabilityTask"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description 渠道已停用或不支持所选协议 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getStabilityTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 任务详情 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StabilityTask"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getStabilityTaskMetrics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 指标报告 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StabilityReport"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description 任务尚未结束，暂无指标报告 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    exportStabilityTask: {
+        parameters: {
+            query: {
+                format: "json";
+            };
+            header?: never;
+            path: {
+                id: components["parameters"]["IdPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 报告文件（Content-Disposition attachment） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StabilityExport"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description 任务尚未结束，暂无报告 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    cancelStabilityTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 取消后的任务 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StabilityTask"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description 任务已结束，不可取消 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    streamStabilityTaskEvents: {
         parameters: {
             query?: never;
             header?: never;

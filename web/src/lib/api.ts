@@ -39,6 +39,15 @@ export type CheckpointScore = components['schemas']['CheckpointScore']
 export type OverviewChannel = components['schemas']['OverviewChannel']
 export type OverviewModelScore = components['schemas']['OverviewModelScore']
 export type ConnectivityHistoryPoint = components['schemas']['ConnectivityHistoryPoint']
+export type StabilityProbeInfo = components['schemas']['StabilityProbeInfo']
+export type StabilityTask = components['schemas']['StabilityTask']
+export type StabilityTaskCreate = components['schemas']['StabilityTaskCreate']
+export type StabilityTaskList = components['schemas']['StabilityTaskList']
+export type StabilityTaskParams = components['schemas']['StabilityTaskParams']
+export type StabilityReport = components['schemas']['StabilityReport']
+export type StabilityStageMetric = components['schemas']['StabilityStageMetric']
+export type StabilityMetrics = components['schemas']['StabilityMetrics']
+export type StabilityPercentiles = components['schemas']['StabilityPercentiles']
 
 // 统一请求封装：非 2xx 抛出带后端 error 文案的异常
 export class RequestError extends Error {
@@ -170,6 +179,29 @@ export const qualityApi = {
   // 导出走浏览器原生下载（会话 cookie 自动携带），不走 request 封装
   exportUrl: (id: string, format: 'json' | 'junit') =>
     `/api/quality/tasks/${id}/export?format=${format}`,
+}
+
+export const stabilityProbesApi = {
+  list: () => request<StabilityProbeInfo[]>('/api/stability/probes'),
+}
+
+export const stabilityApi = {
+  createTask: (body: StabilityTaskCreate) =>
+    request<StabilityTask>('/api/stability/tasks', { method: 'POST', body: JSON.stringify(body) }),
+  listTasks: (opts?: { limit?: number; offset?: number; status?: TaskStatus; channelId?: string }) => {
+    const q = new URLSearchParams()
+    q.set('limit', String(opts?.limit ?? 50))
+    q.set('offset', String(opts?.offset ?? 0))
+    if (opts?.status) q.set('status', opts.status)
+    if (opts?.channelId) q.set('channelId', opts.channelId)
+    return request<StabilityTaskList>(`/api/stability/tasks?${q}`)
+  },
+  getTask: (id: string) => request<StabilityTask>(`/api/stability/tasks/${id}`),
+  cancelTask: (id: string) =>
+    request<StabilityTask>(`/api/stability/tasks/${id}/cancel`, { method: 'POST' }),
+  getMetrics: (id: string) => request<StabilityReport>(`/api/stability/tasks/${id}/metrics`),
+  // 导出走浏览器原生下载（会话 cookie 自动携带），不走 request 封装
+  exportUrl: (id: string) => `/api/stability/tasks/${id}/export?format=json`,
 }
 
 export const rolesApi = {

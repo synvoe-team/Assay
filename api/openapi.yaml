@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Assay API
   description: LLM 渠道检测平台 API。本文件是前后端契约的唯一真相源（契约优先）。
-  version: 0.13.0
+  version: 0.14.0
 servers:
   - url: /api
 paths:
@@ -923,6 +923,220 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+  /stability/probes:
+    get:
+      operationId: listStabilityProbes
+      summary: 稳定性检测项注册表（需 stability 权限；产出性能指标，无评分检查点）
+      tags: [stability]
+      responses:
+        "200":
+          description: 全部已注册稳定性检测项
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StabilityProbeInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /stability/tasks:
+    post:
+      operationId: createStabilityTask
+      summary: 创建稳定性检测任务（需 stability 权限；创建时快照检测对象+协议，入队后由 worker 发压）
+      tags: [stability]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StabilityTaskCreate"
+      responses:
+        "201":
+          description: 任务已创建并入队
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StabilityTask"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: 渠道已停用或不支持所选协议
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    get:
+      operationId: listStabilityTasks
+      summary: 稳定性检测任务历史（需 stability 权限；按创建时间倒序，可按状态/渠道筛选）
+      tags: [stability]
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: status
+          in: query
+          description: 按任务状态筛选；缺省不过滤
+          schema:
+            $ref: "#/components/schemas/TaskStatus"
+        - name: channelId
+          in: query
+          description: 按渠道筛选；缺省不过滤（渠道删除后其任务 channel_id 置空，仅在不过滤时可见）
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 任务列表分页
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StabilityTaskList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /stability/tasks/{id}:
+    get:
+      operationId: getStabilityTask
+      summary: 稳定性任务详情（需 stability 权限；含参数快照）
+      tags: [stability]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: 任务详情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StabilityTask"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /stability/tasks/{id}/metrics:
+    get:
+      operationId: getStabilityTaskMetrics
+      summary: 稳定性指标报告（需 stability 权限；档级+overall 聚合，仅终态任务可用）
+      tags: [stability]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: 指标报告
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StabilityReport"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: 任务尚未结束，暂无指标报告
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /stability/tasks/{id}/export:
+    get:
+      operationId: exportStabilityTask
+      summary: 导出稳定性报告（需 stability 权限；json=证据链自足报告，含全量逐请求样本；仅终态任务可用）
+      tags: [stability]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [json]
+      responses:
+        "200":
+          description: 报告文件（Content-Disposition attachment）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StabilityExport"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: 任务尚未结束，暂无报告
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /stability/tasks/{id}/cancel:
+    post:
+      operationId: cancelStabilityTask
+      summary: 取消稳定性任务（需 stability 权限；排队或运行中的任务可取消，运行中的中止在途请求）
+      tags: [stability]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: 取消后的任务
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StabilityTask"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: 任务已结束，不可取消
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /stability/tasks/{id}/events:
+    get:
+      operationId: streamStabilityTaskEvents
+      summary: 稳定性任务进度事件流（需 stability 权限；SSE，连接后先推当前快照，任务终态后关闭）
+      tags: [stability]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: text/event-stream，每帧 data 为 TaskProgressEvent 的 JSON
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 components:
   parameters:
     IdPath:
@@ -1740,3 +1954,426 @@ components:
       properties:
         error:
           type: string
+    StabilityProbeInfo:
+      description: 稳定性检测项元数据（产出性能指标，无评分检查点）
+      type: object
+      required: [id, name, description, protocols, estRequests]
+      properties:
+        id:
+          description: 检测项唯一标识（如 concurrency_ladder）
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        protocols:
+          description: 适用协议（空=全适用，前端展示为三协议皆可）
+          type: array
+          items:
+            $ref: "#/components/schemas/Protocol"
+        estRequests:
+          description: 按默认参数的最坏预估请求数（前端据实选参数自行重算展示）
+          type: integer
+    StabilityTaskParams:
+      description: 稳定性任务参数：实选协议 + 各 probe 档位 + 全局成本硬闸
+      type: object
+      properties:
+        protocol:
+          description: 本任务实选协议（写入快照；须为渠道声明协议之一）
+          $ref: "#/components/schemas/Protocol"
+        concurrencyLadder:
+          description: 阶梯并发的并发档序列（闭环）
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 512
+          default: [1, 2, 4, 8, 16]
+        requestsPerStage:
+          description: 每档计入统计的请求数
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 20
+        warmupPerStage:
+          description: 每档预热请求数（评估时剔除，不计入指标）；缺省 0（不预热）
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 0
+        ladderMaxTokens:
+          description: 每请求生成上限（max_tokens 砝码，控制单请求耗时与成本）
+          type: integer
+          minimum: 1
+          maximum: 4096
+          default: 64
+        rpmStartRate:
+          description: RPM 实测起始到达率（req/s，开环）
+          type: number
+          minimum: 0.1
+          maximum: 1000
+          default: 2
+        rpmMaxRate:
+          description: RPM 探测速率护栏上限（req/s）；升到此仍不限速则报「边界≥上限」
+          type: number
+          minimum: 0.1
+          maximum: 1000
+          default: 20
+        rpmStageSec:
+          description: RPM 每档发压时长（秒）；前一半为热身（消化渠道残留计数/突发额度），只用后一半判限速
+          type: integer
+          minimum: 2
+          maximum: 600
+          default: 120
+        rpmMaxInFlight:
+          description: RPM 在途请求上限（防雪崩兜底）
+          type: integer
+          minimum: 1
+          maximum: 4096
+          default: 128
+        rpmMaxTokens:
+          description: RPM 每请求生成上限（只关心请求速率，取小）
+          type: integer
+          minimum: 1
+          maximum: 4096
+          default: 16
+        rpmLimitThreshold:
+          description: 判定某档触发限速的 429 占比阈值（0-1）
+          type: number
+          minimum: 0.01
+          maximum: 1
+          default: 0.1
+        rpmBinarySteps:
+          description: 找到限速档后二分细化真实边界的步数
+          type: integer
+          minimum: 0
+          maximum: 12
+          default: 4
+        tpmStartRate:
+          description: TPM 实测起始 token 到达率（token/s，开环；换算请求速率发压）
+          type: number
+          minimum: 1
+          maximum: 1000000
+          default: 200
+        tpmMaxRate:
+          description: TPM 探测 token 速率护栏上限（token/s）；升到此仍不限速则报「边界≥上限」
+          type: number
+          minimum: 1
+          maximum: 1000000
+          default: 2000
+        tpmStageSec:
+          description: TPM 每档发压时长（秒）；前一半为热身，只用后一半判限速
+          type: integer
+          minimum: 2
+          maximum: 600
+          default: 120
+        tpmMaxInFlight:
+          description: TPM 在途请求上限（防雪崩兜底）
+          type: integer
+          minimum: 1
+          maximum: 4096
+          default: 128
+        tpmMaxTokensPerReq:
+          description: TPM 每请求 max_tokens 砝码（顶格数数 prompt 保证打满输出；输入+输出都计）
+          type: integer
+          minimum: 1
+          maximum: 8192
+          default: 256
+        tpmLimitThreshold:
+          description: 判定某档触发限速的 429 占比阈值（0-1）
+          type: number
+          minimum: 0.01
+          maximum: 1
+          default: 0.1
+        tpmBinarySteps:
+          description: 找到限速档后二分细化真实 token 速率边界的步数
+          type: integer
+          minimum: 0
+          maximum: 12
+          default: 4
+        maxTotalRequests:
+          description: 全局请求硬闸；累计达到即收敛停止
+          type: integer
+          minimum: 1
+          default: 10000
+        maxTotalTokens:
+          description: 全局 token 硬闸；累计达到即收敛停止
+          type: integer
+          minimum: 1
+          default: 2000000
+        maxDurationSec:
+          description: 整任务墙钟上限（秒）；到点停派新请求、在途的跑完，已出结果照常出报告并标截断
+          type: integer
+          minimum: 60
+          maximum: 7200
+          default: 3600
+        requestTimeoutMs:
+          description: 单请求超时（毫秒）
+          type: integer
+          minimum: 1000
+          maximum: 600000
+          default: 60000
+    StabilityTaskCreate:
+      type: object
+      required: [channelId, modelEntryId, probes, params]
+      properties:
+        channelId:
+          type: string
+          format: uuid
+        modelEntryId:
+          type: string
+          format: uuid
+        probes:
+          description: 勾选的稳定性检测项 id 集合
+          type: array
+          minItems: 1
+          items:
+            type: string
+        params:
+          $ref: "#/components/schemas/StabilityTaskParams"
+    StabilityTask:
+      type: object
+      required: [id, status, target, probes, params, progressTotal, progressDone, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/TaskStatus"
+        target:
+          $ref: "#/components/schemas/TaskTarget"
+        probes:
+          type: array
+          items:
+            type: string
+        params:
+          description: 生效参数（缺省项已填入默认值）
+          $ref: "#/components/schemas/StabilityTaskParams"
+        progressTotal:
+          type: integer
+        progressDone:
+          type: integer
+        error:
+          type: string
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+    StabilityTaskList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/StabilityTask"
+        total:
+          type: integer
+    StabilityPercentiles:
+      description: 一组延迟观测的分位数摘要（评估期确定性计算，单位毫秒）
+      type: object
+      required: [p50, p95, p99, min, max, avg]
+      properties:
+        p50:
+          type: integer
+        p95:
+          type: integer
+        p99:
+          type: integer
+        min:
+          type: integer
+        max:
+          type: integer
+        avg:
+          type: number
+    StabilityMetrics:
+      description: 一个（probe×档位）的指标集
+      type: object
+      required: [requests, errors, errorRate]
+      properties:
+        requests:
+          description: 计入统计的请求数（已剔除预热）
+          type: integer
+        errors:
+          type: integer
+        errorRate:
+          type: number
+        ttftMs:
+          $ref: "#/components/schemas/StabilityPercentiles"
+        ttfdMs:
+          description: 首个非空增量（推理或正文）耗时分位；推理模型「开始干活」的时刻，非推理模型≈TTFT
+          allOf:
+            - $ref: "#/components/schemas/StabilityPercentiles"
+        ttfbMs:
+          $ref: "#/components/schemas/StabilityPercentiles"
+        totalMs:
+          $ref: "#/components/schemas/StabilityPercentiles"
+        budgetExhausted:
+          description: 生成上限被推理耗尽仍无正文的条数；不计入 errors/errorRate（砝码不足非渠道故障），>0 即 TTFT 结论不可用
+          type: integer
+        cacheHits:
+          description: 输入命中缓存的成功条数；不计入延迟分位
+          type: integer
+        throughputRps:
+          description: 达成吞吐（请求/秒，按样本时间窗计）
+          type: number
+        tokensPerSec:
+          description: 输出 token 吞吐（token/秒）
+          type: number
+        byErrorClass:
+          description: 各错误分类计数
+          type: object
+          additionalProperties:
+            type: integer
+        concurrency:
+          description: 阶梯并发档的并发数（其它 probe 缺省）
+          type: integer
+        targetRate:
+          description: 开环档目标到达率（req/s）
+          type: number
+        achievedRate:
+          description: 开环档实际达成到达率（req/s，在途封顶会低于目标）
+          type: number
+        rateLimited:
+          description: 开环档 429 占比是否判定为触发限速
+          type: boolean
+        convergedRpm:
+          description: __overall__ RPM 收敛的可持续边界（请求/分钟）
+          type: number
+        reachedCap:
+          description: __overall__ 探到速率护栏顶仍未限速（真实边界≥护栏）
+          type: boolean
+        truncated:
+          description: __overall__ RPM/TPM 搜索被全局硬闸截断；未出现限速档时收敛值只是下界，出现过则二分未完成
+          type: boolean
+        truncatedBy:
+          description: __overall__ 先触发的硬闸
+          type: string
+          enum: [requests, tokens, duration]
+        targetTokenRate:
+          description: TPM 开环档目标 token 到达率（token/s）
+          type: number
+        achievedTokenRate:
+          description: TPM 开环档实测 token 吞吐（token/s，输入+输出都计）
+          type: number
+        convergedTpm:
+          description: __overall__ TPM 收敛的可持续边界（token/分钟）
+          type: number
+        rateLimitHeaders:
+          description: 最近一次响应携带的限速头快照（x-ratelimit-*/anthropic-ratelimit-*/retry-after）
+          type: object
+          additionalProperties:
+            type: string
+    StabilityStageMetric:
+      description: 一档（或 __overall__ probe 级）的评估结果
+      type: object
+      required: [probe, stage, stageIndex, metrics]
+      properties:
+        probe:
+          type: string
+        stage:
+          description: 档位标识；__overall__ 为 probe 级汇总
+          type: string
+        stageIndex:
+          description: 档序号；__overall__ 为 -1
+          type: integer
+        metrics:
+          $ref: "#/components/schemas/StabilityMetrics"
+    StabilityReport:
+      description: 稳定性指标报告：档级 + overall 聚合，口径见 footnotes
+      type: object
+      required: [taskId, status, protocol, stages, generatedAt]
+      properties:
+        taskId:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/TaskStatus"
+        protocol:
+          $ref: "#/components/schemas/Protocol"
+        incomplete:
+          description: 任务非正常结束（failed/canceled），指标仅基于已采集样本
+          type: boolean
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/StabilityStageMetric"
+        footnotes:
+          description: 测量口径脚注（TTFT 起点、预热剔除、分位数算法等）
+          type: array
+          items:
+            type: string
+        generatedAt:
+          type: string
+          format: date-time
+    StabilitySample:
+      description: 一次压测请求的逐请求原始时序（证据链源；失败样本延迟/计量字段缺省）
+      type: object
+      required: [probe, stage, stageIndex, seq, protocol, dispatchedAt, ok, warmup]
+      properties:
+        probe:
+          type: string
+        stage:
+          type: string
+        stageIndex:
+          type: integer
+        seq:
+          type: integer
+        protocol:
+          $ref: "#/components/schemas/Protocol"
+        dispatchedAt:
+          type: string
+          format: date-time
+        ok:
+          type: boolean
+        httpStatus:
+          type: integer
+        errorClass:
+          type: string
+        error:
+          type: string
+        httpProto:
+          description: 实际协商的协议版本（如 HTTP/1.1）
+          type: string
+        ttfbMs:
+          type: integer
+        ttfdMs:
+          description: 首个非空增量（推理或正文）耗时
+          type: integer
+        ttftMs:
+          type: integer
+        totalMs:
+          type: integer
+        inputTokens:
+          type: integer
+        outputTokens:
+          type: integer
+        cachedTokens:
+          description: 输入中命中缓存的 token 数
+          type: integer
+        warmup:
+          type: boolean
+    StabilityExport:
+      description: 证据链自足的 JSON 导出：任务快照 + 指标报告 + 全量逐请求样本
+      type: object
+      required: [tool, version, task, report, samples]
+      properties:
+        tool:
+          type: string
+        version:
+          type: string
+        task:
+          $ref: "#/components/schemas/StabilityTask"
+        report:
+          $ref: "#/components/schemas/StabilityReport"
+        samples:
+          type: array
+          items:
+            $ref: "#/components/schemas/StabilitySample"

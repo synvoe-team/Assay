@@ -318,3 +318,42 @@ where t.kind = 'quality'
   and t.channel_id is not null
   and t.status in ('succeeded', 'failed', 'canceled')
 order by t.channel_id, t.target->>'model', t.created_at desc;
+
+-- name: DeleteStabilitySamples :exec
+-- 重试幂等：清掉上次中断留下的半截时序，整个任务从头重跑
+delete from stability_samples where task_id = $1;
+
+-- name: DeleteStabilityMetrics :exec
+delete from stability_metrics where task_id = $1;
+
+-- name: InsertStabilitySample :exec
+insert into stability_samples
+    (task_id, probe, stage, stage_index, seq, protocol, dispatched_at,
+     ttfb_ms, ttfd_ms, ttft_ms, total_ms, ok, http_status, http_proto, error_class, error,
+     input_tokens, output_tokens, cached_tokens, warmup)
+values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20);
+
+-- name: UpsertStabilityMetric :exec
+-- 评估期聚合点落库（同任务重跑幂等覆盖）
+insert into stability_metrics (task_id, probe, stage, stage_index, metrics)
+values ($1, $2, $3, $4, $5)
+on conflict (task_id, probe, stage) do update set
+    stage_index = excluded.stage_index,
+    metrics     = excluded.metrics,
+    created_at  = now();
+
+-- name: ListStabilityMetrics :many
+-- 详情/导出：按 probe、档序取回全部聚合点（__overall__ 的 stage_index=-1 排最后）
+select probe, stage, stage_index, metrics, created_at
+from stability_metrics
+where task_id = $1
+order by probe, stage_index;
+
+-- name: ListStabilitySamples :many
+-- 导出证据链：全量逐请求时序
+select probe, stage, stage_index, seq, protocol, dispatched_at,
+       ttfb_ms, ttfd_ms, ttft_ms, total_ms, ok, http_status, http_proto, error_class, error,
+       input_tokens, output_tokens, cached_tokens, warmup
+from stability_samples
+where task_id = $1
+order by probe, stage_index, seq;
