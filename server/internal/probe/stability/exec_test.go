@@ -121,7 +121,32 @@ data: [DONE]
 	}
 }
 
-// TestSampleKeepsEvidenceOnFailure 失败但拿到 200 的样本（如预算耗尽）保留已测到的计量与时序，作证据链
+// TestDoRequestFirstContentIsFirstDelta 没有推理增量时首增量就是首个正文：TTFT 取首增量时刻。
+// 否则两个钩子分开取时（跨毫秒边界差 1ms），或正文开头像半个 <think> 要等下一帧才定夺（这里等 50ms），
+// 都会造出 TTFD<TTFT，被评估误读成「仍在思考」（线上 v0.15.0 TPM 实测出过 947 vs 948ms）
+func TestDoRequestFirstContentIsFirstDelta(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"<th\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		time.Sleep(50 * time.Millisecond)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"e end\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	t.Cleanup(srv.Close)
+	codec, _ := protocol.Get(protocol.ProtocolOpenAIChat)
+	o := doRequest(context.Background(), srv.Client(), codec, srv.URL, "sk", protocol.Load{Model: "m", Prompt: protocol.Prompt{Unique: "ping"}, MaxTokens: 64}, 5000)
+	if !o.Ok || !o.HasTTFD || !o.HasTTFT || o.Reasoned {
+		t.Fatalf("Ok=%v TTFD=%v TTFT=%v Reasoned=%v（error=%q）", o.Ok, o.HasTTFD, o.HasTTFT, o.Reasoned, o.Error)
+	}
+	if o.TTFT != o.TTFD {
+		t.Errorf("TTFT=%v TTFD=%v，没有推理时两者应相同", o.TTFT, o.TTFD)
+	}
+	if s := sampleFrom(reqSpec{Stage: "c1"}, 0, false, time.Now(), protocol.ProtocolOpenAIChat, o); reasoned(s) {
+		t.Errorf("样本 TTFD=%d TTFT=%d 被误判为有推理", s.TTFDms, s.TTFTms)
+	}
+}
+
+// TestSampleKeepsEvidenceOnFailure失败但拿到 200 的样本（如预算耗尽）保留已测到的计量与时序，作证据链
 func TestSampleKeepsEvidenceOnFailure(t *testing.T) {
 	srv := replayServer(t, `data: {"choices":[{"delta":{"reasoning_content":"想"}}]}
 
