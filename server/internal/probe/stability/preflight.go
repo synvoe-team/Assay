@@ -217,7 +217,7 @@ func preflightMaxTokens(w Workload) int {
 	return max(ladderOutput.MaxTokens, rpmOutput.MaxTokens, tpmOutput.MaxTokens)
 }
 
-// negotiate 发预检请求，4xx 时按上游报错调整形态再发，直到 HTTP 200 或无可再调。
+// negotiate 发预检请求，4xx 时按上游报错调整形态再发，直到上游正常作答或无可再调。
 // 限流/5xx/断流不中止（稳定性检测本身就要测这些），照当前形态往下跑。
 func (in RunInput) negotiate(ctx context.Context, shape *protocol.Shape, pf *Preflight) (outcome, error) {
 	maxTokens := preflightMaxTokens(in.Params.Workload)
@@ -227,12 +227,20 @@ func (in RunInput) negotiate(ctx context.Context, shape *protocol.Shape, pf *Pre
 		if err != nil {
 			return o, err
 		}
-		if o.HasBody {
+		if answered(o) {
 			pf.Passed = true
 			if len(strips) > 1 {
 				return in.restoreStrips(ctx, shape, pf, strips[:len(strips)-1], maxTokens, o)
 			}
 			return o, nil
+		}
+		// 200 之后流里 / 整块 JSON 报错：有的网关不在状态码上报参数错误，点名了我们发的字段就照样针对性调整；
+		// 没点名（上游过载、断流）不盲剔，照跑
+		if o.ErrorClass == ErrStreamAnomaly && len(pf.Adjustments) < maxAdjustments {
+			if note, ok := adapt(shape, in.Params.Compat, in.Codec.ID(), o, maxTokens); ok {
+				pf.Adjustments = append(pf.Adjustments, note)
+				continue
+			}
 		}
 		if o.ErrorClass != ErrHTTP4xx {
 			pf.Detail = o.Error
@@ -256,6 +264,11 @@ func (in RunInput) negotiate(ctx context.Context, shape *protocol.Shape, pf *Pre
 		strips = append(strips, st)
 		pf.Adjustments = append(pf.Adjustments, "报错未点名字段，去掉"+st.what)
 	}
+}
+
+// answered 上游正常作答：HTTP 200 且流没在中途报错或断掉（输出上限用尽、只有推理也算作答）
+func answered(o outcome) bool {
+	return o.HasBody && o.ErrorClass != ErrStreamAnomaly
 }
 
 // preflightRequest 按给定形态发一条预检请求（每条带不同唯一前缀）。
@@ -367,7 +380,7 @@ func (in RunInput) restoreStrips(ctx context.Context, shape *protocol.Shape, pf 
 		if err != nil {
 			return o, err
 		}
-		if r.HasBody {
+		if answered(r) {
 			*shape, o = trial, r
 			kept = append(kept, st.what)
 			restored[st.note] = true

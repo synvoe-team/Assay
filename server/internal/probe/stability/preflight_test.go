@@ -253,7 +253,30 @@ func TestPreflightExplicitFallsBackToAuto(t *testing.T) {
 	}
 }
 
-// TestPreflightRestoresInnocent报错不点名：按顺序先剔了关思考参数（无辜）、再剔自定义字段（元凶）才通过；
+// TestPreflightStreamErrorNamesField 有的网关不在状态码上报参数错误：HTTP 200 后流里吐 error 事件点名
+// stream_options。照样针对性去掉；没点名的流内错误（上游过载等）不乱剔，照跑并记下原因
+func TestPreflightStreamErrorNamesField(t *testing.T) {
+	q := &quirky{reject: func(_ *http.Request, b map[string]any) (int, string) {
+		if has(b, "stream_options") {
+			return 200, "data: {\"error\":{\"message\":\"unsupported parameter: stream_options\"}}\n\n"
+		}
+		return 0, ""
+	}}
+	plan, err, _ := prepareOn(t, q, StabilityParams{})
+	if err != nil || !plan.Shape.NoStreamUsage || !plan.Preflight.Passed || len(plan.Preflight.Adjustments) != 1 {
+		t.Fatalf("err=%v 形态=%+v 预检=%+v，期望点名后去掉 stream_options 通过", err, plan.Shape, plan.Preflight)
+	}
+
+	overloaded := &quirky{reject: func(*http.Request, map[string]any) (int, string) {
+		return 200, "data: {\"error\":{\"message\":\"upstream overloaded\"}}\n\n"
+	}}
+	plan, err, _ = prepareOn(t, overloaded, StabilityParams{})
+	if err != nil || plan.Preflight.Passed || len(plan.Preflight.Adjustments) != 0 || !strings.Contains(plan.Preflight.Detail, "overloaded") {
+		t.Fatalf("err=%v 预检=%+v，期望不调整、照跑并记下原因", err, plan.Preflight)
+	}
+}
+
+// TestPreflightRestoresInnocent 报错不点名：按顺序先剔了关思考参数（无辜）、再剔自定义字段（元凶）才通过；
 // 回补验证把关思考参数装回去照样通过 → 保留它，调整说明里只剩元凶 + 回补结论
 func TestPreflightRestoresInnocent(t *testing.T) {
 	q := &quirky{reject: func(_ *http.Request, b map[string]any) (int, string) {
