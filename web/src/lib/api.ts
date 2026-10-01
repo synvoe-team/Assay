@@ -48,6 +48,9 @@ export type StabilityReport = components['schemas']['StabilityReport']
 export type StabilityStageMetric = components['schemas']['StabilityStageMetric']
 export type StabilityMetrics = components['schemas']['StabilityMetrics']
 export type StabilityPercentiles = components['schemas']['StabilityPercentiles']
+export type StabilityWorkload = components['schemas']['StabilityWorkload']
+export type StabilityDeviation = components['schemas']['StabilityDeviation']
+export type StabilityCalibration = components['schemas']['StabilityCalibration']
 
 // 统一请求封装：非 2xx 抛出带后端 error 文案的异常
 export class RequestError extends Error {

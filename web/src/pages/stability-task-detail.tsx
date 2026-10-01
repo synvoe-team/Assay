@@ -42,10 +42,13 @@ import { isTerminalStatus, useTaskEvents } from '@/hooks/use-task-events'
 import {
   stabilityApi,
   stabilityProbesApi,
+  type StabilityCalibration,
+  type StabilityDeviation,
   type StabilityMetrics,
   type StabilityReport,
   type StabilityStageMetric,
   type StabilityTask,
+  type StabilityWorkload,
 } from '@/lib/api'
 import { type DictKey, useI18n } from '@/lib/i18n'
 import { cn } from '@/lib/utils'
@@ -118,6 +121,106 @@ function num(v: number | undefined): string {
 }
 function ms(v: number | undefined): string {
   return v == null ? '—' : `${Math.round(v)}`
+}
+// signedPct 已是百分数的偏差值带符号显示
+function signedPct(v: number): string {
+  return `${v > 0 ? '+' : ''}${v.toFixed(1)}%`
+}
+
+// workloadCols 本检测项各档有哪些负载画像列：不塑形 / 无输出目标 / h=0 时整列不出
+function workloadCols(rows: StabilityStageMetric[]) {
+  return {
+    input: rows.some((s) => s.metrics.inputDeviation != null),
+    output: rows.some((s) => s.metrics.outputDeviation != null),
+    cache: rows.some((s) => s.metrics.cacheHitRate != null),
+  }
+}
+type WorkloadCols = ReturnType<typeof workloadCols>
+
+// rowTone 输入偏差超阈值的档整行标黄（该档延迟不代表目标负载）
+function rowTone(m: StabilityMetrics, bold?: boolean): string | undefined {
+  return cn(bold && 'font-medium', m.inputDeviation?.exceeded && 'bg-amber-500/10') || undefined
+}
+
+function WorkloadHeads({ cols }: { cols: WorkloadCols }) {
+  const { t } = useI18n()
+  return (
+    <>
+      {cols.input && <TableHead className="text-right">{t('stab.wl.inputDev')}</TableHead>}
+      {cols.output && <TableHead className="text-right">{t('stab.wl.outputDev')}</TableHead>}
+      {cols.cache && <TableHead className="text-right">{t('stab.wl.hitRate')}</TableHead>}
+    </>
+  )
+}
+
+// DeviationValue 偏差 p50，悬停看 |偏差| p95 与范围；超阈值琥珀色
+function DeviationValue({ d }: { d?: StabilityDeviation }) {
+  if (d == null) return <span className="text-muted-foreground">—</span>
+  return (
+    <span
+      title={`p50 ${signedPct(d.p50)} · |p95| ${d.absP95.toFixed(1)}% · ${signedPct(d.min)} ~ ${signedPct(d.max)} · n=${d.samples}`}
+      className={d.exceeded ? 'text-amber-700 dark:text-amber-300' : undefined}
+    >
+      {signedPct(d.p50)}
+    </span>
+  )
+}
+
+function WorkloadCells({ cols, m }: { cols: WorkloadCols; m: StabilityMetrics }) {
+  return (
+    <>
+      {cols.input && (
+        <TableCell className="text-right tabular-nums">
+          <DeviationValue d={m.inputDeviation} />
+        </TableCell>
+      )}
+      {cols.output && (
+        <TableCell className="text-right tabular-nums">
+          <DeviationValue d={m.outputDeviation} />
+        </TableCell>
+      )}
+      {cols.cache && (
+        <TableCell className={cn('text-right tabular-nums', m.cacheMiss && 'text-destructive')}>
+          {m.cacheHitRate == null ? '—' : pct(m.cacheHitRate)}
+        </TableCell>
+      )}
+    </>
+  )
+}
+
+// CalibrationNote 定标结果：名义比 / 实测比 / 偏差，h>0 时附共享前缀与写缓存命中
+function CalibrationNote({ c }: { c: StabilityCalibration }) {
+  const { t } = useI18n()
+  const items = [
+    `${t('stab.wl.nominalRatio')} ${c.nominalRatio.toFixed(2)} ${t('stab.wl.charsPerToken')}`,
+    `${t('stab.wl.measuredRatio')} ${c.measuredRatio.toFixed(2)} ${t('stab.wl.charsPerToken')}`,
+    `${t('stab.wl.deviation')} ${signedPct(c.deviationPct)}`,
+    `${t('stab.wl.calibPrompt')} ${c.chars} → ${c.promptTokens} token`,
+  ]
+  if (c.sharedTokens) items.push(`${t('stab.wl.sharedPrefix')} ${c.sharedTokens} token`)
+  if (c.cacheWarmCached != null) items.push(`${t('stab.wl.cacheWarm')} ${c.cacheWarmCached} token`)
+  return (
+    <div className="grid gap-1">
+      <p className="text-sm font-medium">{t('stab.wl.calibration')}</p>
+      <p className="text-xs text-muted-foreground">{items.join(' · ')}</p>
+    </div>
+  )
+}
+
+// workloadSummary 参数快照里的负载画像一行
+function workloadSummary(w: StabilityWorkload | undefined, t: (k: DictKey) => string): string {
+  const input = w?.input
+  const parts = [
+    !input || input.mode === 'none'
+      ? `${t('stab.wl.inputMode')} ${t('stab.wl.mode.none')}`
+      : input.mode === 'fixed'
+        ? `${t('stab.wl.inputMode')} ${t('stab.wl.mode.fixed')} ${input.value}`
+        : `${t('stab.wl.inputMode')} ${t(`stab.wl.mode.${input.mode}` as DictKey)} ${input.min} ~ ${input.max}`,
+  ]
+  if (w?.cacheHitRate) parts.push(`${t('stab.wl.cacheHitRate')} ${pct(w.cacheHitRate)}`)
+  parts.push(`${t('stab.wl.output')} ${w?.output ?? t('stab.wl.outputDefault')}`)
+  if (w?.disableThinking) parts.push(t('stab.wl.disableThinking'))
+  return parts.join(' · ')
 }
 
 export default function StabilityTaskDetailPage() {
@@ -298,6 +401,8 @@ function MetricsCard({
   // 按出现顺序归拢 probe，保留注册序即展示序
   const probeIds: string[] = []
   for (const s of report.stages) if (!probeIds.includes(s.probe)) probeIds.push(s.probe)
+  // 定标结果写在各检测项的 __overall__ 上，取值相同，取第一份展示
+  const calibration = report.stages.find((s) => s.metrics.calibration != null)?.metrics.calibration
 
   return (
     <Card>
@@ -319,6 +424,7 @@ function MetricsCard({
         {report.incomplete && (
           <p className="text-sm text-amber-600 dark:text-amber-400">{t('stab.incompleteNote')}</p>
         )}
+        {calibration && <CalibrationNote c={calibration} />}
         {report.stages.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t('stab.noMetrics')}</p>
         ) : (
@@ -370,6 +476,8 @@ function ProbeSection({
     (overall?.metrics.convergedRpm != null || stages.some((s) => s.metrics.targetRate != null))
   const { t } = useI18n()
   const budgetExhausted = overall?.metrics.budgetExhausted ?? 0
+  const om = overall?.metrics
+  const deviationExceeded = stages.some((s) => s.metrics.inputDeviation?.exceeded)
   return (
     <div className="grid gap-4">
       <p className="text-sm font-medium">{name}</p>
@@ -379,6 +487,13 @@ function ProbeSection({
           {t('stab.budgetExhaustedBanner')}
         </p>
       )}
+      {om?.cacheMiss && (
+        <p className="flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+          {t('stab.wl.cacheMissBanner')}：{t('stab.wl.target')} {pct(om.cacheExpected ?? 0)}，
+          {t('stab.wl.measured')} {om.cacheHitRate == null ? '—' : pct(om.cacheHitRate)}
+        </p>
+      )}
       {isTpm ? (
         <TpmView stages={stages} overall={overall} />
       ) : isRpm ? (
@@ -386,10 +501,16 @@ function ProbeSection({
       ) : (
         <LadderView stages={stages} overall={overall} />
       )}
+      {deviationExceeded && (
+        <p className="text-xs text-amber-700 dark:text-amber-300">{t('stab.wl.deviationExceeded')}</p>
+      )}
+      {(om?.inputDeviation || om?.outputDeviation) && (
+        <p className="text-xs text-muted-foreground">{t('stab.wl.devHint')}</p>
+      )}
       <ErrorClassBadges overall={overall} />
-      {(overall?.metrics.cacheHits ?? 0) > 0 && (
+      {(om?.cacheHits ?? 0) > 0 && om?.cacheExpected == null && (
         <p className="text-xs text-muted-foreground">
-          {t('stab.cacheHitsNote')}：{overall!.metrics.cacheHits}
+          {t('stab.cacheHitsNote')}：{om!.cacheHits}
         </p>
       )}
     </div>
@@ -405,6 +526,7 @@ function LadderView({
   overall?: StabilityStageMetric
 }) {
   const { t } = useI18n()
+  const cols = workloadCols(overall ? [...stages, overall] : stages)
 
   const showTtfd = hasReasoningGap(stages)
   // 折线数据：有 TTFT、或单列 TTFD 时有 TTFD 的档入图（整档输出上限用尽时 TTFT 缺测但 TTFD 是真实测量）；
@@ -469,14 +591,15 @@ function LadderView({
               <TableHead className="text-right">{t('stab.ttft')} p50</TableHead>
               <TableHead className="text-right">p95</TableHead>
               <TableHead className="text-right">p99</TableHead>
+              <WorkloadHeads cols={cols} />
             </TableRow>
           </TableHeader>
           <TableBody>
             {stages.map((s) => (
-              <MetricRow key={s.stage} label={stageLabel(s)} m={s.metrics} showTtfd={showTtfd} />
+              <MetricRow key={s.stage} label={stageLabel(s)} m={s.metrics} showTtfd={showTtfd} cols={cols} />
             ))}
             {overall && (
-              <MetricRow key="__overall__" label={t('stab.overall')} m={overall.metrics} showTtfd={showTtfd} bold />
+              <MetricRow key="__overall__" label={t('stab.overall')} m={overall.metrics} showTtfd={showTtfd} cols={cols} bold />
             )}
           </TableBody>
         </Table>
@@ -494,6 +617,7 @@ function RpmView({
   overall?: StabilityStageMetric
 }) {
   const { t } = useI18n()
+  const cols = workloadCols(overall ? [...stages, overall] : stages)
   const rpmConfig: ChartConfig = { errorRate: { label: t('stab.errorRate'), color: '#dc2626' } }
 
   // 二分会回访爬坡区间内的速率 → 档序非速率序，按目标速率升序重排画曲线
@@ -596,13 +720,14 @@ function RpmView({
               <TableHead className="text-right">{t('stab.ttft')} p50</TableHead>
               <TableHead className="text-right">p95</TableHead>
               <TableHead className="text-right">p99</TableHead>
+              <WorkloadHeads cols={cols} />
             </TableRow>
           </TableHeader>
           <TableBody>
             {sortedStages.map((s) => (
-              <RpmRow key={s.stage} label={num(s.metrics.targetRate)} m={s.metrics} />
+              <RpmRow key={s.stage} label={num(s.metrics.targetRate)} m={s.metrics} cols={cols} />
             ))}
-            {overall && <RpmRow key="__overall__" label={t('stab.overall')} m={overall.metrics} bold />}
+            {overall && <RpmRow key="__overall__" label={t('stab.overall')} m={overall.metrics} cols={cols} bold />}
           </TableBody>
         </Table>
       </div>
@@ -652,14 +777,16 @@ function MetricRow({
   m,
   bold,
   showTtfd,
+  cols,
 }: {
   label: string
   m: StabilityMetrics
   bold?: boolean
   showTtfd?: boolean
+  cols: WorkloadCols
 }) {
   return (
-    <TableRow className={bold ? 'font-medium' : undefined}>
+    <TableRow className={rowTone(m, bold)}>
       <TableCell>{label}</TableCell>
       <TableCell className="text-right tabular-nums">{m.requests}</TableCell>
       <TableCell className="text-right tabular-nums">{pct(m.errorRate)}</TableCell>
@@ -669,15 +796,16 @@ function MetricRow({
       <TableCell className="text-right tabular-nums">{ms(m.ttftMs?.p50)}</TableCell>
       <TableCell className="text-right tabular-nums">{ms(m.ttftMs?.p95)}</TableCell>
       <TableCell className="text-right tabular-nums">{ms(m.ttftMs?.p99)}</TableCell>
+      <WorkloadCells cols={cols} m={m} />
     </TableRow>
   )
 }
 
 // RpmRow 开环速率档行：目标/达成到达率 + 限速判定 + TTFT 分位数（__overall__ 无速率标注）
-function RpmRow({ label, m, bold }: { label: string; m: StabilityMetrics; bold?: boolean }) {
+function RpmRow({ label, m, bold, cols }: { label: string; m: StabilityMetrics; bold?: boolean; cols: WorkloadCols }) {
   const { t } = useI18n()
   return (
-    <TableRow className={bold ? 'font-medium' : undefined}>
+    <TableRow className={rowTone(m, bold)}>
       <TableCell>{label}</TableCell>
       <TableCell className="text-right tabular-nums">{num(m.achievedRate)}</TableCell>
       <TableCell className="text-right tabular-nums">{m.requests}</TableCell>
@@ -696,6 +824,7 @@ function RpmRow({ label, m, bold }: { label: string; m: StabilityMetrics; bold?:
       <TableCell className="text-right tabular-nums">{ms(m.ttftMs?.p50)}</TableCell>
       <TableCell className="text-right tabular-nums">{ms(m.ttftMs?.p95)}</TableCell>
       <TableCell className="text-right tabular-nums">{ms(m.ttftMs?.p99)}</TableCell>
+      <WorkloadCells cols={cols} m={m} />
     </TableRow>
   )
 }
@@ -709,6 +838,7 @@ function TpmView({
   overall?: StabilityStageMetric
 }) {
   const { t } = useI18n()
+  const cols = workloadCols(overall ? [...stages, overall] : stages)
   const tpmConfig: ChartConfig = { errorRate: { label: t('stab.errorRate'), color: '#dc2626' } }
 
   // 二分会回访 token 速率区间 → 档序非速率序，按目标 token 速率升序重排画曲线
@@ -811,13 +941,14 @@ function TpmView({
               <TableHead className="text-right">{t('stab.ttft')} p50</TableHead>
               <TableHead className="text-right">p95</TableHead>
               <TableHead className="text-right">p99</TableHead>
+              <WorkloadHeads cols={cols} />
             </TableRow>
           </TableHeader>
           <TableBody>
             {sortedStages.map((s) => (
-              <TpmRow key={s.stage} label={num(s.metrics.targetTokenRate)} m={s.metrics} />
+              <TpmRow key={s.stage} label={num(s.metrics.targetTokenRate)} m={s.metrics} cols={cols} />
             ))}
-            {overall && <TpmRow key="__overall__" label={t('stab.overall')} m={overall.metrics} bold />}
+            {overall && <TpmRow key="__overall__" label={t('stab.overall')} m={overall.metrics} cols={cols} bold />}
           </TableBody>
         </Table>
       </div>
@@ -826,10 +957,10 @@ function TpmView({
 }
 
 // TpmRow 开环 token 速率档行：目标/达成 token 到达率 + 限速判定 + TTFT 分位数（__overall__ 无速率标注）
-function TpmRow({ label, m, bold }: { label: string; m: StabilityMetrics; bold?: boolean }) {
+function TpmRow({ label, m, bold, cols }: { label: string; m: StabilityMetrics; bold?: boolean; cols: WorkloadCols }) {
   const { t } = useI18n()
   return (
-    <TableRow className={bold ? 'font-medium' : undefined}>
+    <TableRow className={rowTone(m, bold)}>
       <TableCell>{label}</TableCell>
       <TableCell className="text-right tabular-nums">{num(m.achievedTokenRate)}</TableCell>
       <TableCell className="text-right tabular-nums">{m.requests}</TableCell>
@@ -848,6 +979,7 @@ function TpmRow({ label, m, bold }: { label: string; m: StabilityMetrics; bold?:
       <TableCell className="text-right tabular-nums">{ms(m.ttftMs?.p50)}</TableCell>
       <TableCell className="text-right tabular-nums">{ms(m.ttftMs?.p95)}</TableCell>
       <TableCell className="text-right tabular-nums">{ms(m.ttftMs?.p99)}</TableCell>
+      <WorkloadCells cols={cols} m={m} />
     </TableRow>
   )
 }
@@ -883,8 +1015,9 @@ function SnapshotCard({
     [t('quality.probes'), task.probes.map(probeName).join('、')],
     [
       t('quality.paramsLabel'),
-      `${t('stab.ladder')} [${p.concurrencyLadder.join(', ')}] · ${t('stab.requestsPerStage')} ${p.requestsPerStage} · ${t('stab.warmupPerStage')} ${p.warmupPerStage} · ${t('stab.ladderMaxTokens')} ${p.ladderMaxTokens}`,
+      `${t('stab.ladder')} [${p.concurrencyLadder.join(', ')}] · ${t('stab.requestsPerStage')} ${p.requestsPerStage} · ${t('stab.warmupPerStage')} ${p.warmupPerStage}`,
     ],
+    [t('stab.wl.title'), workloadSummary(p.workload, t)],
     [
       t('stab.maxTotalRequests'),
       `${p.maxTotalRequests} · ${t('stab.maxTotalTokens')} ${p.maxTotalTokens} · ${t('stab.maxDurationSec')} ${p.maxDurationSec} · ${t('stab.requestTimeout')} ${p.requestTimeoutMs}`,
@@ -894,14 +1027,14 @@ function SnapshotCard({
   if (task.probes.includes('rpm_probe')) {
     rows.push([
       t('stab.rpmParams'),
-      `${p.rpmStartRate} → ${p.rpmMaxRate} req/s · ${t('stab.rpmStageSec')} ${p.rpmStageSec}s · ${t('stab.rpmMaxInFlight')} ${p.rpmMaxInFlight} · ${t('stab.rpmMaxTokens')} ${p.rpmMaxTokens} · ${t('stab.rpmLimitThreshold')} ${pct(p.rpmLimitThreshold)} · ${t('stab.rpmBinarySteps')} ${p.rpmBinarySteps}`,
+      `${p.rpmStartRate} → ${p.rpmMaxRate} req/s · ${t('stab.rpmStageSec')} ${p.rpmStageSec}s · ${t('stab.rpmMaxInFlight')} ${p.rpmMaxInFlight} · ${t('stab.rpmLimitThreshold')} ${pct(p.rpmLimitThreshold)} · ${t('stab.rpmBinarySteps')} ${p.rpmBinarySteps}`,
     ])
   }
   // TPM 实测参数仅在勾选 tpm_probe 时定格展示
   if (task.probes.includes('tpm_probe')) {
     rows.push([
       t('stab.tpmParams'),
-      `${p.tpmStartRate} → ${p.tpmMaxRate} token/s · ${t('stab.tpmStageSec')} ${p.tpmStageSec}s · ${t('stab.tpmMaxInFlight')} ${p.tpmMaxInFlight} · ${t('stab.tpmMaxTokensPerReq')} ${p.tpmMaxTokensPerReq} · ${t('stab.tpmLimitThreshold')} ${pct(p.tpmLimitThreshold)} · ${t('stab.tpmBinarySteps')} ${p.tpmBinarySteps}`,
+      `${p.tpmStartRate} → ${p.tpmMaxRate} token/s · ${t('stab.tpmStageSec')} ${p.tpmStageSec}s · ${t('stab.tpmMaxInFlight')} ${p.tpmMaxInFlight} · ${t('stab.tpmLimitThreshold')} ${pct(p.tpmLimitThreshold)} · ${t('stab.tpmBinarySteps')} ${p.tpmBinarySteps}`,
     ])
   }
   rows.push([

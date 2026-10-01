@@ -17,6 +17,8 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
+import { Slider } from '@/components/ui/slider'
+import { Switch } from '@/components/ui/switch'
 import {
   Select,
   SelectContent,
@@ -40,6 +42,7 @@ import {
   type Protocol,
   type StabilityProbeInfo,
   type StabilityTask,
+  type StabilityWorkload,
   type TaskStatus,
 } from '@/lib/api'
 import { type DictKey, useI18n } from '@/lib/i18n'
@@ -80,23 +83,33 @@ function estRpmRequests(start: number, max: number, stageSec: number, binaryStep
   return ramp + binarySteps * perStage(max)
 }
 
-// TPM_INPUT_TOKENS_EST 每请求名义输入 token（换算「token 速率 → 请求速率」用），对齐后端 tpmInputTokensEst
-const TPM_INPUT_TOKENS_EST = 24
-
 // estTpmRequests 复刻后端 TPM 最坏预估：token 速率各档按 reqRate=tokenRate/权重 换算请求速率后 ⌈reqRate×sec⌉+1 求和
 function estTpmRequests(
   start: number,
   max: number,
   stageSec: number,
   binarySteps: number,
-  maxTokensPerReq: number,
+  weight: number,
 ): number {
-  if (start <= 0 || stageSec <= 0) return 0
-  const weight = TPM_INPUT_TOKENS_EST + (maxTokensPerReq > 0 ? maxTokensPerReq : 1)
+  if (start <= 0 || stageSec <= 0 || weight <= 0) return 0
   const perStage = (tokenRate: number) => Math.ceil((tokenRate / weight) * stageSec) + 1
   const ramp = rampRates(start, max).reduce((sum, r) => sum + perStage(r), 0)
   return ramp + binarySteps * perStage(max)
 }
+
+// —— 负载画像（口径对齐后端 stability/workload.go）——
+type InputMode = NonNullable<StabilityWorkload['input']>['mode']
+const INPUT_MODES: InputMode[] = ['none', 'fixed', 'ramp', 'jitter']
+// 未设输出目标时各检测项的生成上限
+const DEFAULT_OUTPUT: Record<string, number> = { concurrency_ladder: 2048, rpm_probe: 16, tpm_probe: 256 }
+// SMALL_PROMPT_TOKENS 不塑形时每请求输入的名义 token：顶格数数 prompt + 唯一标记（后端 tpmWeightPerReq 同值）
+const SMALL_PROMPT_TOKENS = 57
+const MAX_INPUT_TOKENS = 1_000_000
+const MAX_OUTPUT_TOKENS = 32768
+const MIN_CACHEABLE_TOKENS = 1024 // 渠道前缀缓存最小可缓存长度
+const MIN_UNIQUE_TOKENS = 64 // h>0 时每请求唯一段下限
+const CALIB_TOKENS = 3000 // 定标请求 ≈ 12000 字符
+const CACHE_WARMUP_REQUESTS = 2
 
 export default function StabilityPage() {
   const { t } = useI18n()
@@ -112,13 +125,19 @@ export default function StabilityPage() {
   const [ladderText, setLadderText] = useState('1,2,4,8,16')
   const [requestsPerStage, setRequestsPerStage] = useState('20')
   const [warmupPerStage, setWarmupPerStage] = useState('2')
-  const [ladderMaxTokens, setLadderMaxTokens] = useState('2048')
+  // 负载画像：全缺省 = 小 prompt、不共享前缀、输出按各检测项默认
+  const [inputMode, setInputMode] = useState<InputMode>('none')
+  const [inputValue, setInputValue] = useState('8000')
+  const [inputMin, setInputMin] = useState('2000')
+  const [inputMax, setInputMax] = useState('8000')
+  const [cacheHitRate, setCacheHitRate] = useState(0)
+  const [outputTarget, setOutputTarget] = useState('') // 空 = 各检测项默认
+  const [disableThinking, setDisableThinking] = useState(false)
   // RPM 实测参数（开环恒定到达率爬坡 + 二分收敛）
   const [rpmStartRate, setRpmStartRate] = useState('2')
   const [rpmMaxRate, setRpmMaxRate] = useState('20')
   const [rpmStageSec, setRpmStageSec] = useState('120')
   const [rpmMaxInFlight, setRpmMaxInFlight] = useState('128')
-  const [rpmMaxTokens, setRpmMaxTokens] = useState('16')
   const [rpmLimitThreshold, setRpmLimitThreshold] = useState('0.1')
   const [rpmBinarySteps, setRpmBinarySteps] = useState('4')
   // TPM 实测参数（开环恒定 token 到达率爬坡 + 二分收敛；输入+输出都计）
@@ -126,7 +145,6 @@ export default function StabilityPage() {
   const [tpmMaxRate, setTpmMaxRate] = useState('2000')
   const [tpmStageSec, setTpmStageSec] = useState('120')
   const [tpmMaxInFlight, setTpmMaxInFlight] = useState('128')
-  const [tpmMaxTokensPerReq, setTpmMaxTokensPerReq] = useState('256')
   const [tpmLimitThreshold, setTpmLimitThreshold] = useState('0.1')
   const [tpmBinarySteps, setTpmBinarySteps] = useState('4')
   const [maxTotalRequests, setMaxTotalRequests] = useState('10000')
@@ -202,25 +220,53 @@ export default function StabilityPage() {
   const ladderNums = parseLadder(ladderText)
   const rps = Number(requestsPerStage) || 0
   const warmup = Number(warmupPerStage) || 0
-  const maxTok = Number(ladderMaxTokens) || 0
   const rpmStart = Number(rpmStartRate) || 0
   const rpmMax = Number(rpmMaxRate) || 0
   const rpmSec = Number(rpmStageSec) || 0
   const rpmInFlight = Number(rpmMaxInFlight) || 0
-  const rpmMaxTok = Number(rpmMaxTokens) || 0
   const rpmThreshold = Number(rpmLimitThreshold) || 0
   const rpmSteps = Number(rpmBinarySteps) || 0
   const tpmStart = Number(tpmStartRate) || 0
   const tpmMax = Number(tpmMaxRate) || 0
   const tpmSec = Number(tpmStageSec) || 0
   const tpmInFlight = Number(tpmMaxInFlight) || 0
-  const tpmMaxTok = Number(tpmMaxTokensPerReq) || 0
   const tpmThreshold = Number(tpmLimitThreshold) || 0
   const tpmSteps = Number(tpmBinarySteps) || 0
   const totalReqCap = Number(maxTotalRequests) || 0
   const totalTokCap = Number(maxTotalTokens) || 0
   const rpmChecked = checked.includes('rpm_probe')
   const tpmChecked = checked.includes('tpm_probe')
+  const timeoutMs = Number(requestTimeoutMs) || 0
+
+  // 负载画像派生量：输入目标的下限/上限/期望（递增与抖动取区间均值），共享前缀 ≈ h × 期望
+  const shaped = inputMode !== 'none'
+  const inVal = Number(inputValue) || 0
+  const inLo = inputMode === 'fixed' ? inVal : Number(inputMin) || 0
+  const inHi = inputMode === 'fixed' ? inVal : Number(inputMax) || 0
+  const inputMean = shaped ? (inLo + inHi) / 2 : 0
+  const h = shaped ? cacheHitRate : 0
+  const sharedTokens = Math.round(h * inputMean)
+  const outTarget = outputTarget.trim() === '' ? 0 : Number(outputTarget)
+  const outFor = (probeId: string) => (outTarget > 0 ? outTarget : (DEFAULT_OUTPUT[probeId] ?? 2048))
+  const timeoutFloor = Math.max(60000, inHi)
+  // 复刻后端 validateWorkload 的 fail-fast：创建前就说清哪里不行
+  const workloadIssue = ((): string | null => {
+    if (inputMode === 'fixed' && !(Number.isInteger(inVal) && inVal >= 1 && inVal <= MAX_INPUT_TOKENS))
+      return t('stab.wl.errValue')
+    if ((inputMode === 'ramp' || inputMode === 'jitter') && !(inLo >= 1 && inLo < inHi && inHi <= MAX_INPUT_TOKENS))
+      return t('stab.wl.errRange')
+    if (outputTarget.trim() !== '' && !(Number.isInteger(outTarget) && outTarget >= 1 && outTarget <= MAX_OUTPUT_TOKENS))
+      return t('stab.wl.errOutput')
+    if (h > 0 && sharedTokens < MIN_CACHEABLE_TOKENS) return `${t('stab.wl.errShared')}（≈ ${sharedTokens} token）`
+    if (h > 0 && inLo - sharedTokens < MIN_UNIQUE_TOKENS) return t('stab.wl.errUnique')
+    if (shaped && totalTokCap > 0 && inHi + (outTarget || 2048) > totalTokCap) return t('stab.wl.errTotalTokens')
+    if (shaped && timeoutMs < timeoutFloor) return `${t('stab.wl.errTimeout')} ${timeoutFloor} ms`
+    return null
+  })()
+  // 准备期请求：塑形时 1 条定标，h>0 再加写缓存
+  const prepRequests = shaped ? 1 + (h > 0 ? CACHE_WARMUP_REQUESTS : 0) : 0
+  // TPM 每请求 token 权重 = 输入期望 + 输出目标（对齐后端 tpmWeightPerReq）
+  const tpmWeight = (shaped ? inputMean : SMALL_PROMPT_TOKENS) + outFor('tpm_probe')
 
   // 最坏预估请求数：各 probe 按实选参数求和。不再被总请求硬闸钳制后展示——
   // 钳制会把「超上限、会被截断」藏起来；超出时单独告警。
@@ -228,16 +274,10 @@ export default function StabilityPage() {
   const estPerProbe = (p: StabilityProbeInfo): number => {
     if (p.id === 'concurrency_ladder') return ladderNums.length * (rps + warmup)
     if (p.id === 'rpm_probe') return estRpmRequests(rpmStart, rpmMax, rpmSec, rpmSteps)
-    if (p.id === 'tpm_probe') return estTpmRequests(tpmStart, tpmMax, tpmSec, tpmSteps, tpmMaxTok)
+    if (p.id === 'tpm_probe') return estTpmRequests(tpmStart, tpmMax, tpmSec, tpmSteps, tpmWeight)
     return p.estRequests
   }
-  // 各 probe 每请求生成上限不同（阶梯/RPM/TPM 各自 max_tokens），token 估算按 probe 加权
-  const maxTokForProbe = (p: StabilityProbeInfo): number => {
-    if (p.id === 'rpm_probe') return rpmMaxTok
-    if (p.id === 'tpm_probe') return tpmMaxTok
-    return maxTok
-  }
-  const estRequests = checkedProbes.reduce((sum, p) => sum + estPerProbe(p), 0)
+  const estRequests = prepRequests + checkedProbes.reduce((sum, p) => sum + estPerProbe(p), 0)
   const overRequestCap = totalReqCap > 0 && estRequests > totalReqCap
   // RPM/TPM 最长耗时 = 最坏档数（爬坡档 + 二分步数）× 每档时长；阶梯取决于渠道延迟，不计入
   const pacedSec = (start: number, max: number, steps: number, sec: number) =>
@@ -246,21 +286,42 @@ export default function StabilityPage() {
     (rpmChecked ? pacedSec(rpmStart, rpmMax, rpmSteps, rpmSec) : 0) +
     (tpmChecked ? pacedSec(tpmStart, tpmMax, tpmSteps, tpmSec) : 0)
   const overDurationCap = estPacedSec > (Number(maxDurationSec) || 0)
-  // 预估费用上界：只算输出侧（顶格 prompt 输入极小），各 probe 按自身 max_tokens 加权后受总 token 硬闸钳制
-  const estTokensRaw = checkedProbes.reduce(
-    (sum, p) => sum + Math.min(estPerProbe(p), totalReqCap || Infinity) * maxTokForProbe(p),
-    0,
-  )
-  const estTokens = Math.min(estTokensRaw, totalTokCap || estTokensRaw)
+  // 预估费用上界：输入侧按输入期望（含定标/写缓存），其中 h 部分按缓存读价、其余按输入价；
+  // 输出侧按各 probe 的生成上限；总量受总 token 硬闸钳制（按比例缩放）
+  const inputPerReq = shaped ? inputMean : SMALL_PROMPT_TOKENS
+  let estIn = shaped ? CALIB_TOKENS + (h > 0 ? CACHE_WARMUP_REQUESTS * sharedTokens : 0) : 0
+  let estOut = 0
+  for (const p of checkedProbes) {
+    const n = Math.min(estPerProbe(p), totalReqCap || Infinity)
+    estIn += n * inputPerReq
+    estOut += n * outFor(p.id)
+  }
+  const tokScale = totalTokCap > 0 ? Math.min(1, totalTokCap / Math.max(estIn + estOut, 1)) : 1
+  const inPrice = model?.inputPrice ?? (shaped ? undefined : 0) // 不塑形时输入极小，缺输入价按 0 计
+  const cachedPrice = model?.cachedInputPrice ?? inPrice
   const estCost =
-    model?.outputPrice != null ? (estTokens * model.outputPrice) / 1_000_000 : null
+    model?.outputPrice != null && inPrice != null && cachedPrice != null
+      ? (tokScale * (estIn * ((1 - h) * inPrice + h * cachedPrice) + estOut * model.outputPrice)) / 1_000_000
+      : null
 
   const paramsValid =
     ladderNums.length > 0 &&
     rps >= 1 &&
-    maxTok >= 1 &&
-    (!rpmChecked || (rpmStart >= 0.1 && rpmMax >= rpmStart && rpmSec >= 2 && rpmMaxTok >= 1)) &&
-    (!tpmChecked || (tpmStart >= 1 && tpmMax >= tpmStart && tpmSec >= 2 && tpmMaxTok >= 1))
+    workloadIssue == null &&
+    (!rpmChecked || (rpmStart >= 0.1 && rpmMax >= rpmStart && rpmSec >= 2)) &&
+    (!tpmChecked || (tpmStart >= 1 && tpmMax >= tpmStart && tpmSec >= 2))
+
+  const workload: StabilityWorkload = {
+    input:
+      inputMode === 'fixed'
+        ? { mode: 'fixed', value: inVal }
+        : inputMode === 'none'
+          ? { mode: 'none' }
+          : { mode: inputMode, min: inLo, max: inHi },
+    cacheHitRate: h,
+    ...(outTarget > 0 ? { output: outTarget } : {}),
+    disableThinking,
+  }
 
   const submit = () => {
     create.mutate({
@@ -272,25 +333,23 @@ export default function StabilityPage() {
         concurrencyLadder: ladderNums,
         requestsPerStage: rps,
         warmupPerStage: warmup,
-        ladderMaxTokens: maxTok,
+        workload,
         rpmStartRate: rpmStart,
         rpmMaxRate: rpmMax,
         rpmStageSec: rpmSec,
         rpmMaxInFlight: rpmInFlight,
-        rpmMaxTokens: rpmMaxTok,
         rpmLimitThreshold: rpmThreshold,
         rpmBinarySteps: rpmSteps,
         tpmStartRate: tpmStart,
         tpmMaxRate: tpmMax,
         tpmStageSec: tpmSec,
         tpmMaxInFlight: tpmInFlight,
-        tpmMaxTokensPerReq: tpmMaxTok,
         tpmLimitThreshold: tpmThreshold,
         tpmBinarySteps: tpmSteps,
         maxTotalRequests: totalReqCap,
         maxTotalTokens: totalTokCap,
         maxDurationSec: Number(maxDurationSec) || 3600,
-        requestTimeoutMs: Number(requestTimeoutMs) || 60000,
+        requestTimeoutMs: timeoutMs || 60000,
       },
     })
   }
@@ -430,6 +489,117 @@ export default function StabilityPage() {
             </p>
           </div>
 
+          <div className="grid gap-3 rounded-md border p-3">
+            <div className="grid gap-1">
+              <p className="text-sm font-medium">{t('stab.wl.title')}</p>
+              <p className="text-xs text-muted-foreground">{t('stab.wl.desc')}</p>
+            </div>
+            <div className="flex flex-wrap items-end gap-3">
+              <div className="grid gap-2">
+                <Label>{t('stab.wl.inputMode')}</Label>
+                <Select value={inputMode} onValueChange={(v) => setInputMode(v as InputMode)}>
+                  <SelectTrigger className="w-40">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {INPUT_MODES.map((m) => (
+                      <SelectItem key={m} value={m}>
+                        {t(`stab.wl.mode.${m}` as DictKey)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {inputMode === 'fixed' && (
+                <div className="grid gap-2">
+                  <Label htmlFor="s-wl-value">{t('stab.wl.inputValue')}</Label>
+                  <Input
+                    id="s-wl-value"
+                    type="number"
+                    min={1}
+                    max={MAX_INPUT_TOKENS}
+                    className="w-36"
+                    value={inputValue}
+                    onChange={(e) => setInputValue(e.target.value)}
+                  />
+                </div>
+              )}
+              {(inputMode === 'ramp' || inputMode === 'jitter') && (
+                <>
+                  <div className="grid gap-2">
+                    <Label htmlFor="s-wl-min">{t('stab.wl.inputMin')}</Label>
+                    <Input
+                      id="s-wl-min"
+                      type="number"
+                      min={1}
+                      max={MAX_INPUT_TOKENS}
+                      className="w-36"
+                      value={inputMin}
+                      onChange={(e) => setInputMin(e.target.value)}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="s-wl-max">{t('stab.wl.inputMax')}</Label>
+                    <Input
+                      id="s-wl-max"
+                      type="number"
+                      min={1}
+                      max={MAX_INPUT_TOKENS}
+                      className="w-36"
+                      value={inputMax}
+                      onChange={(e) => setInputMax(e.target.value)}
+                    />
+                  </div>
+                </>
+              )}
+              <div className="grid gap-2">
+                <Label htmlFor="s-wl-cache">
+                  {t('stab.wl.cacheHitRate')}
+                  <span className="tabular-nums text-muted-foreground">{Math.round(h * 100)}%</span>
+                </Label>
+                <Slider
+                  id="s-wl-cache"
+                  className="h-9 w-48"
+                  min={0}
+                  max={0.95}
+                  step={0.05}
+                  disabled={!shaped}
+                  value={[h]}
+                  onValueChange={([v]) => setCacheHitRate(Math.round(v * 100) / 100)}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="s-wl-output">{t('stab.wl.output')}</Label>
+                <Input
+                  id="s-wl-output"
+                  type="number"
+                  min={1}
+                  max={MAX_OUTPUT_TOKENS}
+                  className="w-36"
+                  placeholder={t('stab.wl.outputDefault')}
+                  value={outputTarget}
+                  onChange={(e) => setOutputTarget(e.target.value)}
+                />
+              </div>
+              <div className="flex h-9 items-center gap-2">
+                <Switch id="s-wl-think" checked={disableThinking} onCheckedChange={setDisableThinking} />
+                <Label htmlFor="s-wl-think">{t('stab.wl.disableThinking')}</Label>
+              </div>
+            </div>
+            {workloadIssue ? (
+              <p className="text-xs text-destructive">{workloadIssue}</p>
+            ) : (
+              <p className="flex flex-wrap gap-x-2 text-xs text-muted-foreground">
+                <span>{shaped ? t(`stab.wl.modeHint.${inputMode}` as DictKey) : t('stab.wl.noneHint')}</span>
+                {h > 0 && (
+                  <span className="tabular-nums">
+                    {t('stab.wl.sharedPrefix')} ≈ {sharedTokens} token
+                  </span>
+                )}
+              </p>
+            )}
+          </div>
+
           <div className="grid gap-3">
             <button
               type="button"
@@ -475,18 +645,6 @@ export default function StabilityPage() {
                     className="w-36"
                     value={warmupPerStage}
                     onChange={(e) => setWarmupPerStage(e.target.value)}
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="s-maxtok">{t('stab.ladderMaxTokens')}</Label>
-                  <Input
-                    id="s-maxtok"
-                    type="number"
-                    min={1}
-                    max={4096}
-                    className="w-36"
-                    value={ladderMaxTokens}
-                    onChange={(e) => setLadderMaxTokens(e.target.value)}
                   />
                 </div>
                 {rpmChecked && (
@@ -536,18 +694,6 @@ export default function StabilityPage() {
                         className="w-36"
                         value={rpmMaxInFlight}
                         onChange={(e) => setRpmMaxInFlight(e.target.value)}
-                      />
-                    </div>
-                    <div className="grid gap-2">
-                      <Label htmlFor="s-rpm-maxtok">{t('stab.rpmMaxTokens')}</Label>
-                      <Input
-                        id="s-rpm-maxtok"
-                        type="number"
-                        min={1}
-                        max={4096}
-                        className="w-36"
-                        value={rpmMaxTokens}
-                        onChange={(e) => setRpmMaxTokens(e.target.value)}
                       />
                     </div>
                     <div className="grid gap-2">
@@ -622,18 +768,6 @@ export default function StabilityPage() {
                         className="w-36"
                         value={tpmMaxInFlight}
                         onChange={(e) => setTpmMaxInFlight(e.target.value)}
-                      />
-                    </div>
-                    <div className="grid gap-2">
-                      <Label htmlFor="s-tpm-maxtok">{t('stab.tpmMaxTokensPerReq')}</Label>
-                      <Input
-                        id="s-tpm-maxtok"
-                        type="number"
-                        min={1}
-                        max={8192}
-                        className="w-36"
-                        value={tpmMaxTokensPerReq}
-                        onChange={(e) => setTpmMaxTokensPerReq(e.target.value)}
                       />
                     </div>
                     <div className="grid gap-2">
