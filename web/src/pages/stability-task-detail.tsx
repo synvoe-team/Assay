@@ -407,14 +407,15 @@ function LadderView({
   const { t } = useI18n()
 
   const showTtfd = hasReasoningGap(stages)
-  // 折线数据：仅有 TTFT 分位数的档入图；x 轴用并发数（缺省回退档标识）
+  // 折线数据：有 TTFT、或单列 TTFD 时有 TTFD 的档入图（整档输出上限用尽时 TTFT 缺测但 TTFD 是真实测量）；
+  // 缺测的系列在该档留空（不 connectNulls，不编造点）；x 轴用并发数（缺省回退档标识）
   const chartData = stages
-    .filter((s) => s.metrics.ttftMs != null)
+    .filter((s) => s.metrics.ttftMs != null || (showTtfd && s.metrics.ttfdMs != null))
     .map((s) => ({
       label: stageLabel(s),
-      p50: s.metrics.ttftMs!.p50,
-      p95: s.metrics.ttftMs!.p95,
-      p99: s.metrics.ttftMs!.p99,
+      p50: s.metrics.ttftMs?.p50,
+      p95: s.metrics.ttftMs?.p95,
+      p99: s.metrics.ttftMs?.p99,
       ttfdP50: s.metrics.ttfdMs?.p50,
     }))
   const series = showTtfd ? (['ttfdP50', 'p50', 'p95', 'p99'] as const) : (['p50', 'p95', 'p99'] as const)
