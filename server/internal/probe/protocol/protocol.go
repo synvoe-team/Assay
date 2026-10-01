@@ -12,7 +12,7 @@ import (
 // Usage 一次响应的 token 计量（TPM 加权与实际吞吐计算用）。
 // Ok=false 表示该响应未携带 usage —— 是「缺失」而非「0」，评估时区别对待。
 type Usage struct {
-	Prompt     int64
+	Prompt     int64 // 总输入 token，三协议同口径：含命中缓存的部分（anthropic 解析时已加回缓存读写）
 	Completion int64
 	Cached     int64 // 输入中命中缓存的 token 数（破缓存断言用；渠道不报则为 0）
 	Ok         bool

@@ -311,7 +311,8 @@ data: {"type":"message_stop"}
 	}
 }
 
-// TestScanStreamCached 三协议缓存命中 token 提取（断言破缓存用）
+// TestScanStreamCached 三协议缓存命中 token 提取，且 Prompt 统一为「含缓存的总输入」：
+// openai 两协议的 prompt/input_tokens 本就含 cached；anthropic 的 input_tokens 不含缓存读写，须加回
 func TestScanStreamCached(t *testing.T) {
 	cases := []struct{ name, proto, stream string }{
 		{"chat prompt_tokens_details", ProtocolOpenAIChat, `data: {"choices":[{"delta":{"content":"a"},"finish_reason":"stop"}]}
@@ -330,6 +331,12 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 
 data: {"type":"message_stop"}
 `},
+		{"anthropic 缓存读写都要加回总输入", ProtocolAnthropicMessages, `data: {"type":"message_start","message":{"usage":{"input_tokens":1,"cache_creation_input_tokens":2,"cache_read_input_tokens":7,"output_tokens":1}}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"a"}}
+
+data: {"type":"message_stop"}
+`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -337,8 +344,8 @@ data: {"type":"message_stop"}
 			if err != nil {
 				t.Fatalf("出错: %v", err)
 			}
-			if r.Usage.Cached != 7 {
-				t.Errorf("Cached=%d，期望 7", r.Usage.Cached)
+			if r.Usage.Cached != 7 || r.Usage.Prompt != 10 {
+				t.Errorf("Cached/Prompt=%d/%d，期望 7/10（Prompt 为含缓存的总输入）", r.Usage.Cached, r.Usage.Prompt)
 			}
 		})
 	}

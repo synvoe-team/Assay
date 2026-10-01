@@ -83,17 +83,20 @@ func (anthropic) ScanStream(r io.Reader, h Hooks) (Result, error) {
 		typ, _ := strField(m, "type")
 		switch typ {
 		case "message_start":
-			// 初始 usage：input_tokens 全量给出，output_tokens 起始（后续在 message_delta 累计）
+			// 初始 usage：输入计量全量给出，output_tokens 起始（后续在 message_delta 累计）。
+			// anthropic 的 input_tokens 不含缓存读写（总输入 = input + cache_creation + cache_read），
+			// 加回后与 openai 两协议「prompt/input_tokens 含 cached」同口径
 			msg, _ := objField(m, "message")
 			uv, ok := objField(msg, "usage")
 			if !ok {
 				return nil
 			}
 			if p, ok := intField(uv, "input_tokens"); ok {
-				res.Prompt = p
+				created, _ := intField(uv, "cache_creation_input_tokens")
+				res.Cached, _ = intField(uv, "cache_read_input_tokens")
+				res.Prompt = p + created + res.Cached
 				res.Ok = true
 			}
-			res.Cached, _ = intField(uv, "cache_read_input_tokens")
 		case "content_block_delta":
 			delta, _ := objField(m, "delta")
 			// input_json_delta（工具入参）既非正文也非推理，不计
