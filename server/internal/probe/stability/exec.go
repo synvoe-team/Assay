@@ -130,6 +130,11 @@ func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, b
 	}
 	o.Usage = res.Usage
 	o.Reasoned = res.SawReasoning || res.Usage.Reasoning > 0
+	// 没见过推理增量 = 首个非空增量就是正文：首字取首增量时刻。两个钩子分开取时会跨毫秒边界，
+	// 正文开头像半个 <think> 时 TTFT 还要等下一帧才定夺，都会造出 TTFD<TTFT 被误读成「有思考」
+	if !res.SawReasoning && o.HasTTFD && o.HasTTFT {
+		o.TTFT = o.TTFD
+	}
 	if err != nil {
 		o.ErrorClass = ErrStreamAnomaly
 		o.Error = "读取响应流失败: " + truncateOneLine(err.Error())
