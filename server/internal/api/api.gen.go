@@ -53,22 +53,22 @@ func (e CaseMode) Valid() bool {
 
 // Defines values for CaseStatus.
 const (
-	Collected CaseStatus = "collected"
-	Passed    CaseStatus = "passed"
-	Rejected  CaseStatus = "rejected"
-	Violated  CaseStatus = "violated"
+	CaseStatusCollected CaseStatus = "collected"
+	CaseStatusPassed    CaseStatus = "passed"
+	CaseStatusRejected  CaseStatus = "rejected"
+	CaseStatusViolated  CaseStatus = "violated"
 )
 
 // Valid indicates whether the value is a known member of the CaseStatus enum.
 func (e CaseStatus) Valid() bool {
 	switch e {
-	case Collected:
+	case CaseStatusCollected:
 		return true
-	case Passed:
+	case CaseStatusPassed:
 		return true
-	case Rejected:
+	case CaseStatusRejected:
 		return true
-	case Violated:
+	case CaseStatusViolated:
 		return true
 	default:
 		return false
@@ -147,6 +147,48 @@ func (e Protocol) Valid() bool {
 	}
 }
 
+// Defines values for StabilityCompatMaxTokensField.
+const (
+	StabilityCompatMaxTokensFieldAuto                StabilityCompatMaxTokensField = "auto"
+	StabilityCompatMaxTokensFieldMaxCompletionTokens StabilityCompatMaxTokensField = "max_completion_tokens"
+	StabilityCompatMaxTokensFieldMaxTokens           StabilityCompatMaxTokensField = "max_tokens"
+)
+
+// Valid indicates whether the value is a known member of the StabilityCompatMaxTokensField enum.
+func (e StabilityCompatMaxTokensField) Valid() bool {
+	switch e {
+	case StabilityCompatMaxTokensFieldAuto:
+		return true
+	case StabilityCompatMaxTokensFieldMaxCompletionTokens:
+		return true
+	case StabilityCompatMaxTokensFieldMaxTokens:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StabilityCompatStreamUsage.
+const (
+	StabilityCompatStreamUsageAuto StabilityCompatStreamUsage = "auto"
+	StabilityCompatStreamUsageOff  StabilityCompatStreamUsage = "off"
+	StabilityCompatStreamUsageOn   StabilityCompatStreamUsage = "on"
+)
+
+// Valid indicates whether the value is a known member of the StabilityCompatStreamUsage enum.
+func (e StabilityCompatStreamUsage) Valid() bool {
+	switch e {
+	case StabilityCompatStreamUsageAuto:
+		return true
+	case StabilityCompatStreamUsageOff:
+		return true
+	case StabilityCompatStreamUsageOn:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for StabilityMetricsTruncatedBy.
 const (
 	Duration StabilityMetricsTruncatedBy = "duration"
@@ -168,27 +210,111 @@ func (e StabilityMetricsTruncatedBy) Valid() bool {
 	}
 }
 
+// Defines values for StabilityThinking.
+const (
+	StabilityThinkingAuto                   StabilityThinking = "auto"
+	StabilityThinkingChatTemplateKwargs     StabilityThinking = "chat_template_kwargs"
+	StabilityThinkingDefault                StabilityThinking = "default"
+	StabilityThinkingEnableThinkingFalse    StabilityThinking = "enable_thinking_false"
+	StabilityThinkingReasoningEffortMinimal StabilityThinking = "reasoning_effort_minimal"
+	StabilityThinkingReasoningEffortNone    StabilityThinking = "reasoning_effort_none"
+	StabilityThinkingReasoningEnabledFalse  StabilityThinking = "reasoning_enabled_false"
+	StabilityThinkingThinkingDisabled       StabilityThinking = "thinking_disabled"
+)
+
+// Valid indicates whether the value is a known member of the StabilityThinking enum.
+func (e StabilityThinking) Valid() bool {
+	switch e {
+	case StabilityThinkingAuto:
+		return true
+	case StabilityThinkingChatTemplateKwargs:
+		return true
+	case StabilityThinkingDefault:
+		return true
+	case StabilityThinkingEnableThinkingFalse:
+		return true
+	case StabilityThinkingReasoningEffortMinimal:
+		return true
+	case StabilityThinkingReasoningEffortNone:
+		return true
+	case StabilityThinkingReasoningEnabledFalse:
+		return true
+	case StabilityThinkingThinkingDisabled:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StabilityThinkingTrialOutcome.
+const (
+	StabilityThinkingTrialOutcomeDisabled       StabilityThinkingTrialOutcome = "disabled"
+	StabilityThinkingTrialOutcomeFailed         StabilityThinkingTrialOutcome = "failed"
+	StabilityThinkingTrialOutcomeRejected       StabilityThinkingTrialOutcome = "rejected"
+	StabilityThinkingTrialOutcomeStillReasoning StabilityThinkingTrialOutcome = "still_reasoning"
+)
+
+// Valid indicates whether the value is a known member of the StabilityThinkingTrialOutcome enum.
+func (e StabilityThinkingTrialOutcome) Valid() bool {
+	switch e {
+	case StabilityThinkingTrialOutcomeDisabled:
+		return true
+	case StabilityThinkingTrialOutcomeFailed:
+		return true
+	case StabilityThinkingTrialOutcomeRejected:
+		return true
+	case StabilityThinkingTrialOutcomeStillReasoning:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StabilityWorkloadInputMode.
+const (
+	Fixed  StabilityWorkloadInputMode = "fixed"
+	Jitter StabilityWorkloadInputMode = "jitter"
+	None   StabilityWorkloadInputMode = "none"
+	Ramp   StabilityWorkloadInputMode = "ramp"
+)
+
+// Valid indicates whether the value is a known member of the StabilityWorkloadInputMode enum.
+func (e StabilityWorkloadInputMode) Valid() bool {
+	switch e {
+	case Fixed:
+		return true
+	case Jitter:
+		return true
+	case None:
+		return true
+	case Ramp:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for TaskStatus.
 const (
-	Canceled  TaskStatus = "canceled"
-	Failed    TaskStatus = "failed"
-	Queued    TaskStatus = "queued"
-	Running   TaskStatus = "running"
-	Succeeded TaskStatus = "succeeded"
+	TaskStatusCanceled  TaskStatus = "canceled"
+	TaskStatusFailed    TaskStatus = "failed"
+	TaskStatusQueued    TaskStatus = "queued"
+	TaskStatusRunning   TaskStatus = "running"
+	TaskStatusSucceeded TaskStatus = "succeeded"
 )
 
 // Valid indicates whether the value is a known member of the TaskStatus enum.
 func (e TaskStatus) Valid() bool {
 	switch e {
-	case Canceled:
+	case TaskStatusCanceled:
 		return true
-	case Failed:
+	case TaskStatusFailed:
 		return true
-	case Queued:
+	case TaskStatusQueued:
 		return true
-	case Running:
+	case TaskStatusRunning:
 		return true
-	case Succeeded:
+	case TaskStatusSucceeded:
 		return true
 	default:
 		return false
@@ -704,6 +830,75 @@ type RoleUpdate struct {
 	Permissions *PermissionMap `json:"permissions,omitempty"`
 }
 
+// StabilityCalibration 负载画像定标：任务开始先发一条固定字符数的填充请求，读 prompt_tokens 得实测字符/token 比，后续请求按此比例凑长度
+type StabilityCalibration struct {
+	// CacheWarmCached 写缓存预热的第二条请求实测 cached_tokens（验证共享前缀已写入渠道缓存；上游不报缓存字段时缺省）
+	CacheWarmCached *int `json:"cacheWarmCached,omitempty"`
+
+	// Chars 定标填充字符数
+	Chars int `json:"chars"`
+
+	// DeviationPct 实测比相对名义比的偏差（%）
+	DeviationPct float32 `json:"deviationPct"`
+
+	// MeasuredRatio 实测字符/token 比
+	MeasuredRatio float32 `json:"measuredRatio"`
+
+	// NominalRatio 名义字符/token 比
+	NominalRatio float32 `json:"nominalRatio"`
+
+	// PromptTokens 定标请求实测 prompt_tokens
+	PromptTokens int `json:"promptTokens"`
+
+	// Reason 没测成的原因
+	Reason *string `json:"reason,omitempty"`
+
+	// SharedTokens 共享前缀目标 token 数（缓存命中率 >0 时有）
+	SharedTokens *int `json:"sharedTokens,omitempty"`
+
+	// Uncalibrated 定标没测成（上游不报 usage / 定标请求失败 / 计量异常）：按名义比塑形照跑，输入偏差无从实测或不准
+	Uncalibrated *bool `json:"uncalibrated,omitempty"`
+}
+
+// StabilityCompat 请求兼容选项（三个检测项共用）。默认全自动：任务开头的预检按上游实际反应调整请求形态（报错点名某字段就针对性剔除或换写法， 没点名就逐项剔除可选部分），调整写进报告；只有认证/模型/路径类错误才中止任务
+type StabilityCompat struct {
+	// ChatCacheControl openai_chat 也给共享前缀打 cache_control 断点（OpenRouter→Claude/Gemini、阿里云显式缓存需要）；缺省走自动前缀缓存直接拼接
+	ChatCacheControl *bool `json:"chatCacheControl,omitempty"`
+
+	// ExtraBody 并进请求体顶层的自定义字段（如 vLLM/SGLang 的 ignore_eos、temperature、厂商私有参数），同名覆盖思考控制的字段；不能覆盖 model/messages/input/stream/各生成上限字段
+	ExtraBody *map[string]interface{} `json:"extraBody,omitempty"`
+
+	// ExtraHeaders 追加的请求头（同名覆盖认证头）；会明文存进任务快照，不要放密钥
+	ExtraHeaders *map[string]string `json:"extraHeaders,omitempty"`
+
+	// MaxTokensField 生成上限字段（仅 openai_chat）。auto = 先发 max_tokens，上游要求 max_completion_tokens（OpenAI 推理模型）时自动改用
+	MaxTokensField *StabilityCompatMaxTokensField `json:"maxTokensField,omitempty"`
+
+	// StreamUsage 流式尾帧 usage（仅 openai_chat 的 stream_options.include_usage）。auto = 发，上游不认识时自动去掉；off 时拿不到 usage 的渠道无法定标、偏差缺测
+	StreamUsage *StabilityCompatStreamUsage `json:"streamUsage,omitempty"`
+}
+
+// StabilityCompatMaxTokensField 生成上限字段（仅 openai_chat）。auto = 先发 max_tokens，上游要求 max_completion_tokens（OpenAI 推理模型）时自动改用
+type StabilityCompatMaxTokensField string
+
+// StabilityCompatStreamUsage 流式尾帧 usage（仅 openai_chat 的 stream_options.include_usage）。auto = 发，上游不认识时自动去掉；off 时拿不到 usage 的渠道无法定标、偏差缺测
+type StabilityCompatStreamUsage string
+
+// StabilityDeviation 目标 vs 实测 token 的相对偏差分布（%，正 = 实测多于目标）
+type StabilityDeviation struct {
+	// AbsP95 |偏差| 的 p95
+	AbsP95 float32 `json:"absP95"`
+
+	// Exceeded |偏差| p95 超过 ±10%
+	Exceeded bool    `json:"exceeded"`
+	Max      float32 `json:"max"`
+	Min      float32 `json:"min"`
+	P50      float32 `json:"p50"`
+
+	// Samples 参与统计的样本数（正常应答且有 usage）
+	Samples int `json:"samples"`
+}
+
 // StabilityExport 证据链自足的 JSON 导出：任务快照 + 指标报告 + 全量逐请求样本
 type StabilityExport struct {
 	// Report 稳定性指标报告：档级 + overall 聚合，口径见 footnotes
@@ -728,8 +923,20 @@ type StabilityMetrics struct {
 	// ByErrorClass 各错误分类计数
 	ByErrorClass *map[string]int `json:"byErrorClass,omitempty"`
 
+	// CacheExpected 目标缓存命中率 h（仅 >0 时有）
+	CacheExpected *float32 `json:"cacheExpected,omitempty"`
+
+	// CacheHitRate 实测缓存命中率 = Σcached_tokens / Σinput_tokens（正常应答样本；仅目标命中率 >0 时有）
+	CacheHitRate *float32 `json:"cacheHitRate,omitempty"`
+
 	// CacheHits 输入命中缓存的成功条数；不计入延迟分位
 	CacheHits *int `json:"cacheHits,omitempty"`
+
+	// CacheMiss 实测命中率偏离目标超过 ±0.10（渠道缓存未按预期命中）
+	CacheMiss *bool `json:"cacheMiss,omitempty"`
+
+	// Calibration __overall__ 负载画像定标结果（仅输入塑形时有）
+	Calibration *StabilityCalibration `json:"calibration,omitempty"`
 
 	// Concurrency 阶梯并发档的并发数（其它 probe 缺省）
 	Concurrency *int `json:"concurrency,omitempty"`
@@ -744,6 +951,15 @@ type StabilityMetrics struct {
 	ErrorRate float32 `json:"errorRate"`
 	Errors    int     `json:"errors"`
 
+	// InputDeviation 目标输入 vs 实测 prompt_tokens 的相对偏差分布（仅输入塑形时有）
+	InputDeviation *StabilityDeviation `json:"inputDeviation,omitempty"`
+
+	// OutputDeviation 目标输出 vs 实测 completion_tokens 的相对偏差分布（仅有输出目标时有）
+	OutputDeviation *StabilityDeviation `json:"outputDeviation,omitempty"`
+
+	// Preflight __overall__ 预检结论（请求形态的兼容调整、关思考探测）
+	Preflight *StabilityPreflight `json:"preflight,omitempty"`
+
 	// RateLimitHeaders 最近一次响应携带的限速头快照（x-ratelimit-*/anthropic-ratelimit-*/retry-after）
 	RateLimitHeaders *map[string]string `json:"rateLimitHeaders,omitempty"`
 
@@ -752,6 +968,9 @@ type StabilityMetrics struct {
 
 	// ReachedCap __overall__ 探到速率护栏顶仍未限速（真实边界≥护栏）
 	ReachedCap *bool `json:"reachedCap,omitempty"`
+
+	// ReasoningSeen 正常应答中出现推理的条数（推理增量 / 正文开头的 think 段 / usage 报了推理 token / 输出上限被思考用完；请求关闭思考时据此判断是否关掉）
+	ReasoningSeen *int `json:"reasoningSeen,omitempty"`
 
 	// Requests 计入统计的请求数（已剔除预热）
 	Requests int `json:"requests"`
@@ -800,6 +1019,39 @@ type StabilityPercentiles struct {
 	P99 int     `json:"p99"`
 }
 
+// StabilityPreflight 预检结论：任务开头按上游实际反应定下的请求形态、做过的兼容调整、关思考探测结果
+type StabilityPreflight struct {
+	// Adjustments 按上游报错做的兼容调整（人话）
+	Adjustments *[]string `json:"adjustments,omitempty"`
+
+	// Detail 未通过时最后一次的错误（限流/5xx/断流，照常往下跑）
+	Detail *string `json:"detail,omitempty"`
+
+	// NonStream 上游无视 stream=true 回整块 JSON（首增量/首字测不到）
+	NonStream *bool `json:"nonStream,omitempty"`
+
+	// Passed 预检请求拿到了 HTTP 200
+	Passed bool `json:"passed"`
+
+	// Reasoning 预检请求里模型有没有思考
+	Reasoning bool `json:"reasoning"`
+
+	// Requests 预检共发请求数（含自适应重发与关思考试探）
+	Requests int `json:"requests"`
+
+	// Thinking 最终采用的关思考写法 ID；缺省 = 不发思考参数
+	Thinking *string `json:"thinking,omitempty"`
+
+	// ThinkingField 该写法实发的字段原文
+	ThinkingField *string `json:"thinkingField,omitempty"`
+
+	// Trials 自动探测逐个试的结果
+	Trials *[]StabilityThinkingTrial `json:"trials,omitempty"`
+
+	// UsageReported 上游响应是否带 usage
+	UsageReported bool `json:"usageReported"`
+}
+
 // StabilityProbeInfo 稳定性检测项元数据（产出性能指标，无评分检查点）
 type StabilityProbeInfo struct {
 	Description string `json:"description"`
@@ -833,7 +1085,7 @@ type StabilityReport struct {
 
 // StabilitySample 一次压测请求的逐请求原始时序（证据链源；失败样本延迟/计量字段缺省）
 type StabilitySample struct {
-	// CachedTokens 输入中命中缓存的 token 数
+	// CachedTokens 输入中命中缓存的 token 数（上游不报缓存字段时缺省）
 	CachedTokens *int      `json:"cachedTokens,omitempty"`
 	DispatchedAt time.Time `json:"dispatchedAt"`
 	Error        *string   `json:"error,omitempty"`
@@ -848,12 +1100,21 @@ type StabilitySample struct {
 	Probe        string  `json:"probe"`
 
 	// Protocol 渠道支持的接口协议
-	Protocol   Protocol `json:"protocol"`
-	Seq        int      `json:"seq"`
-	Stage      string   `json:"stage"`
-	StageIndex int      `json:"stageIndex"`
-	TotalMs    *int     `json:"totalMs,omitempty"`
-	TtfbMs     *int     `json:"ttfbMs,omitempty"`
+	Protocol Protocol `json:"protocol"`
+
+	// ReasoningTokens usage 明细里的推理 token（无 usage 缺省；渠道不报为 0）
+	ReasoningTokens *int   `json:"reasoningTokens,omitempty"`
+	Seq             int    `json:"seq"`
+	Stage           string `json:"stage"`
+	StageIndex      int    `json:"stageIndex"`
+
+	// TargetInputTokens 本条请求的目标输入 token（仅输入塑形时有）
+	TargetInputTokens *int `json:"targetInputTokens,omitempty"`
+
+	// TargetOutputTokens 本条请求的目标输出 token（有输出目标时有）
+	TargetOutputTokens *int `json:"targetOutputTokens,omitempty"`
+	TotalMs            *int `json:"totalMs,omitempty"`
+	TtfbMs             *int `json:"ttfbMs,omitempty"`
 
 	// TtfdMs 首个非空增量（推理或正文）耗时
 	TtfdMs *int `json:"ttfdMs,omitempty"`
@@ -914,11 +1175,11 @@ type StabilityTaskList struct {
 
 // StabilityTaskParams 稳定性任务参数：实选协议 + 各 probe 档位 + 全局成本硬闸
 type StabilityTaskParams struct {
+	// Compat 请求兼容选项（三个检测项共用）。默认全自动：任务开头的预检按上游实际反应调整请求形态（报错点名某字段就针对性剔除或换写法， 没点名就逐项剔除可选部分），调整写进报告；只有认证/模型/路径类错误才中止任务
+	Compat *StabilityCompat `json:"compat,omitempty"`
+
 	// ConcurrencyLadder 阶梯并发的并发档序列（闭环）
 	ConcurrencyLadder *[]int `json:"concurrencyLadder,omitempty"`
-
-	// LadderMaxTokens 每请求生成上限（max_tokens）；推理模型先思考再写正文，太小会被思考占满、测不到 TTFT
-	LadderMaxTokens *int `json:"ladderMaxTokens,omitempty"`
 
 	// MaxDurationSec 整任务墙钟上限（秒）；到点停派新请求、在途的跑完，已出结果照常出报告并标截断
 	MaxDurationSec *int `json:"maxDurationSec,omitempty"`
@@ -950,9 +1211,6 @@ type StabilityTaskParams struct {
 	// RpmMaxRate RPM 探测速率护栏上限（req/s）；升到此仍不限速则报「边界≥上限」
 	RpmMaxRate *float32 `json:"rpmMaxRate,omitempty"`
 
-	// RpmMaxTokens RPM 每请求生成上限（只关心请求速率，取小）
-	RpmMaxTokens *int `json:"rpmMaxTokens,omitempty"`
-
 	// RpmStageSec RPM 每档发压时长（秒）；前一半为热身（消化渠道残留计数/突发额度），只用后一半判限速
 	RpmStageSec *int `json:"rpmStageSec,omitempty"`
 
@@ -971,9 +1229,6 @@ type StabilityTaskParams struct {
 	// TpmMaxRate TPM 探测 token 速率护栏上限（token/s）；升到此仍不限速则报「边界≥上限」
 	TpmMaxRate *float32 `json:"tpmMaxRate,omitempty"`
 
-	// TpmMaxTokensPerReq TPM 每请求 max_tokens 砝码（顶格数数 prompt 保证打满输出；输入+输出都计）
-	TpmMaxTokensPerReq *int `json:"tpmMaxTokensPerReq,omitempty"`
-
 	// TpmStageSec TPM 每档发压时长（秒）；前一半为热身，只用后一半判限速
 	TpmStageSec *int `json:"tpmStageSec,omitempty"`
 
@@ -982,7 +1237,60 @@ type StabilityTaskParams struct {
 
 	// WarmupPerStage 每档预热请求数（评估时剔除，不计入指标）；缺省 0（不预热）
 	WarmupPerStage *int `json:"warmupPerStage,omitempty"`
+
+	// Workload 负载画像：控制每条压测请求的输入 token 数、缓存命中率、输出 token 数。全缺省 = 小输入、不共享前缀、输出沿用各检测项默认
+	Workload *StabilityWorkload `json:"workload,omitempty"`
 }
+
+// StabilityThinking 思考控制。default 不干预（不发任何思考参数）；auto 预检时自动探测：模型默认不思考就什么都不发，否则按协议候选顺序逐个试， 采用第一个「上游收下且不再思考」的写法，全都关不掉就按渠道默认测（可能该模型官方就不支持关思考）； 其余为指定写法：thinking_disabled = thinking.type=disabled（DeepSeek/GLM/Kimi/豆包/Anthropic）、 reasoning_effort_none / reasoning_effort_minimal = chat 的 reasoning_effort 或 responses 的 reasoning.effort （OpenAI/Gemini/DeepSeek；minimal 只减不关）、enable_thinking_false = enable_thinking=false（通义千问）、 chat_template_kwargs = chat_template_kwargs.enable_thinking=false（vLLM/SGLang 自部署）、 reasoning_enabled_false = reasoning.enabled=false（OpenRouter）。anthropic 协议只适用 thinking_disabled。 指定写法被上游拒收时预检会剔除它，模型会思考的话再自动探测其余写法，结果在报告注明
+type StabilityThinking string
+
+// StabilityThinkingTrial defines model for StabilityThinkingTrial.
+type StabilityThinkingTrial struct {
+	// Detail rejected/failed 时的上游报错
+	Detail *string `json:"detail,omitempty"`
+
+	// Field 实发字段原文
+	Field string `json:"field"`
+
+	// Outcome disabled 关掉了（采用）/ still_reasoning 收下了但照样思考 / rejected 上游 4xx 拒收 / failed 限流或 5xx 等无法判断
+	Outcome StabilityThinkingTrialOutcome `json:"outcome"`
+	Variant string                        `json:"variant"`
+}
+
+// StabilityThinkingTrialOutcome disabled 关掉了（采用）/ still_reasoning 收下了但照样思考 / rejected 上游 4xx 拒收 / failed 限流或 5xx 等无法判断
+type StabilityThinkingTrialOutcome string
+
+// StabilityWorkload 负载画像：控制每条压测请求的输入 token 数、缓存命中率、输出 token 数。全缺省 = 小输入、不共享前缀、输出沿用各检测项默认
+type StabilityWorkload struct {
+	// CacheHitRate 目标缓存命中率 h（0-0.95）；>0 时每条 prompt 以约 h×输入目标的任务内共享前缀开头，须配合输入塑形且共享前缀 ≥1024 token
+	CacheHitRate *float32 `json:"cacheHitRate,omitempty"`
+
+	// Input 每条压测请求的输入 token 目标。none=沿用小 prompt（不塑形）；fixed=固定目标；ramp=按本档排定顺序从 min 匀速涨到 max；jitter=[min,max] 内均匀随机（以任务 ID 做种，可复现）
+	Input *StabilityWorkloadInput `json:"input,omitempty"`
+
+	// Output 每请求输出 token 目标：max_tokens=该值并用顶格数数 prompt 诱导写满；缺省 = 各检测项默认（阶梯并发 2048 / RPM 16 / TPM 256）
+	Output *int `json:"output,omitempty"`
+
+	// Thinking 思考控制。default 不干预（不发任何思考参数）；auto 预检时自动探测：模型默认不思考就什么都不发，否则按协议候选顺序逐个试， 采用第一个「上游收下且不再思考」的写法，全都关不掉就按渠道默认测（可能该模型官方就不支持关思考）； 其余为指定写法：thinking_disabled = thinking.type=disabled（DeepSeek/GLM/Kimi/豆包/Anthropic）、 reasoning_effort_none / reasoning_effort_minimal = chat 的 reasoning_effort 或 responses 的 reasoning.effort （OpenAI/Gemini/DeepSeek；minimal 只减不关）、enable_thinking_false = enable_thinking=false（通义千问）、 chat_template_kwargs = chat_template_kwargs.enable_thinking=false（vLLM/SGLang 自部署）、 reasoning_enabled_false = reasoning.enabled=false（OpenRouter）。anthropic 协议只适用 thinking_disabled。 指定写法被上游拒收时预检会剔除它，模型会思考的话再自动探测其余写法，结果在报告注明
+	Thinking *StabilityThinking `json:"thinking,omitempty"`
+}
+
+// StabilityWorkloadInput 每条压测请求的输入 token 目标。none=沿用小 prompt（不塑形）；fixed=固定目标；ramp=按本档排定顺序从 min 匀速涨到 max；jitter=[min,max] 内均匀随机（以任务 ID 做种，可复现）
+type StabilityWorkloadInput struct {
+	// Max ramp/jitter 区间上限（须大于 min）
+	Max *int `json:"max,omitempty"`
+
+	// Min ramp/jitter 区间下限
+	Min  *int                       `json:"min,omitempty"`
+	Mode StabilityWorkloadInputMode `json:"mode"`
+
+	// Value fixed 模式的目标 token 数
+	Value *int `json:"value,omitempty"`
+}
+
+// StabilityWorkloadInputMode defines model for StabilityWorkloadInput.Mode.
+type StabilityWorkloadInputMode string
 
 // TaskStatBucket defines model for TaskStatBucket.
 type TaskStatBucket struct {

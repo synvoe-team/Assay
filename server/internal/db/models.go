@@ -76,27 +76,30 @@ type StabilityMetric struct {
 }
 
 type StabilitySample struct {
-	ID           int64
-	TaskID       uuid.UUID
-	Probe        string
-	Stage        string
-	StageIndex   int32
-	Seq          int32
-	Protocol     string
-	DispatchedAt time.Time
-	TtfbMs       pgtype.Int4
-	TtfdMs       pgtype.Int4
-	TtftMs       pgtype.Int4
-	TotalMs      pgtype.Int4
-	Ok           bool
-	HttpStatus   pgtype.Int4
-	HttpProto    *string
-	ErrorClass   *string
-	Error        *string
-	InputTokens  pgtype.Int4
-	OutputTokens pgtype.Int4
-	CachedTokens pgtype.Int4
-	Warmup       bool
+	ID                 int64
+	TaskID             uuid.UUID
+	Probe              string
+	Stage              string
+	StageIndex         int32
+	Seq                int32
+	Protocol           string
+	DispatchedAt       time.Time
+	TtfbMs             pgtype.Int4
+	TtfdMs             pgtype.Int4
+	TtftMs             pgtype.Int4
+	TotalMs            pgtype.Int4
+	Ok                 bool
+	HttpStatus         pgtype.Int4
+	HttpProto          *string
+	ErrorClass         *string
+	Error              *string
+	InputTokens        pgtype.Int4
+	OutputTokens       pgtype.Int4
+	CachedTokens       pgtype.Int4
+	Warmup             bool
+	TargetInputTokens  pgtype.Int4
+	TargetOutputTokens pgtype.Int4
+	ReasoningTokens    pgtype.Int4
 }
 
 type Task struct {

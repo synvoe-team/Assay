@@ -31,16 +31,18 @@ func (openaiResponses) Auth(req *http.Request, apiKey string) {
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 }
 
-func (openaiResponses) LoadBody(model, content string, maxTokens int) ([]byte, error) {
-	if maxTokens < responsesMinMaxTokens {
-		maxTokens = responsesMinMaxTokens // 低于下限上游直接 400
-	}
-	return probe.MarshalNoEscape(responsesBody{
-		Model:           model,
-		Input:           content,
-		MaxOutputTokens: maxTokens,
+func (openaiResponses) LoadBody(l Load) ([]byte, error) {
+	b := responsesBody{
+		Model:           l.Model,
+		Input:           l.Prompt.Text(),
+		MaxOutputTokens: max(l.maxTokens(), responsesMinMaxTokens), // 低于下限上游直接 400
 		Stream:          true,
-	})
+	}
+	body, err := probe.MarshalNoEscape(b)
+	if err != nil {
+		return nil, err
+	}
+	return applyShape(body, ProtocolOpenAIResponses, l.Shape)
 }
 
 func (openaiResponses) ScanStream(r io.Reader, h Hooks) (Result, error) {
@@ -59,29 +61,8 @@ func (openaiResponses) ScanStream(r io.Reader, h Hooks) (Result, error) {
 			// max_output_tokens 打满时终态常是 incomplete 而非 completed，usage 同样带；
 			// 两者都是正常结束，否则小 max_tokens 压测会大面积误判为断流。
 			res.Completed = true
-			resp, ok := objField(m, "response")
-			if !ok {
-				return nil
-			}
-			if d, ok := objField(resp, "incomplete_details"); ok {
-				if reason, _ := strField(d, "reason"); reason == "max_output_tokens" {
-					res.HitMaxTokens = true
-				}
-			}
-			uv, ok := objField(resp, "usage")
-			if !ok {
-				return nil
-			}
-			if p, ok := intField(uv, "input_tokens"); ok {
-				res.Prompt = p
-				res.Ok = true
-			}
-			if c, ok := intField(uv, "output_tokens"); ok {
-				res.Completion = c
-				res.Ok = true
-			}
-			if d, ok := objField(uv, "input_tokens_details"); ok {
-				res.Cached, _ = intField(d, "cached_tokens")
+			if resp, ok := objField(m, "response"); ok {
+				responsesTerminal(resp, &res)
 			}
 		case "response.failed":
 			resp, _ := objField(m, "response")
@@ -96,5 +77,71 @@ func (openaiResponses) ScanStream(r io.Reader, h Hooks) (Result, error) {
 		}
 		return nil
 	})
+	tr.finish()
 	return res, err
+}
+
+// ParseBody 上游无视 stream=true 回了整块 response 对象：从 output 里取推理与正文
+func (openaiResponses) ParseBody(raw []byte) (Result, error) {
+	var res Result
+	m, err := decodeObject(raw)
+	if err != nil {
+		return res, err
+	}
+	tr := tracker{res: &res}
+	output, _ := m["output"].([]any)
+	for _, it := range output {
+		item, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		parts, _ := item["content"].([]any)
+		summary, _ := item["summary"].([]any)
+		for _, p := range append(parts, summary...) {
+			part, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			txt, _ := strField(part, "text")
+			switch typ, _ := strField(part, "type"); typ {
+			case "output_text":
+				tr.content(txt)
+			case "reasoning_text", "summary_text":
+				tr.reasoning(txt)
+			}
+		}
+	}
+	responsesTerminal(m, &res)
+	tr.finish()
+	res.Completed = true
+	return res, nil
+}
+
+// responsesTerminal 终态 response 对象：是否因上限截断 + usage（input_tokens 含 cached）
+func responsesTerminal(resp map[string]any, res *Result) {
+	if d, ok := objField(resp, "incomplete_details"); ok {
+		if reason, _ := strField(d, "reason"); reason == "max_output_tokens" {
+			res.HitMaxTokens = true
+		}
+	}
+	uv, ok := objField(resp, "usage")
+	if !ok {
+		return
+	}
+	if p, ok := intField(uv, "input_tokens"); ok {
+		res.Prompt = p
+		res.Ok = true
+	}
+	if c, ok := intField(uv, "output_tokens"); ok {
+		res.Completion = c
+		res.Ok = true
+	}
+	if d, ok := objField(uv, "input_tokens_details"); ok {
+		if c, ok := intField(d, "cached_tokens"); ok {
+			res.Cached, res.CachedOk = c, true
+		}
+	}
+	if d, ok := objField(uv, "output_tokens_details"); ok {
+		res.Reasoning, _ = intField(d, "reasoning_tokens")
+	}
 }

@@ -1093,10 +1093,107 @@ export interface components {
             /** @description 按默认参数的最坏预估请求数（前端据实选参数自行重算展示） */
             estRequests: number;
         };
+        /** @description 每条压测请求的输入 token 目标。none=沿用小 prompt（不塑形）；fixed=固定目标；ramp=按本档排定顺序从 min 匀速涨到 max；jitter=[min,max] 内均匀随机（以任务 ID 做种，可复现） */
+        StabilityWorkloadInput: {
+            /**
+             * @default none
+             * @enum {string}
+             */
+            mode: "none" | "fixed" | "ramp" | "jitter";
+            /** @description fixed 模式的目标 token 数 */
+            value?: number;
+            /** @description ramp/jitter 区间下限 */
+            min?: number;
+            /** @description ramp/jitter 区间上限（须大于 min） */
+            max?: number;
+        };
+        /** @description 负载画像：控制每条压测请求的输入 token 数、缓存命中率、输出 token 数。全缺省 = 小输入、不共享前缀、输出沿用各检测项默认 */
+        StabilityWorkload: {
+            input?: components["schemas"]["StabilityWorkloadInput"];
+            /**
+             * @description 目标缓存命中率 h（0-0.95）；>0 时每条 prompt 以约 h×输入目标的任务内共享前缀开头，须配合输入塑形且共享前缀 ≥1024 token
+             * @default 0
+             */
+            cacheHitRate: number;
+            /** @description 每请求输出 token 目标：max_tokens=该值并用顶格数数 prompt 诱导写满；缺省 = 各检测项默认（阶梯并发 2048 / RPM 16 / TPM 256） */
+            output?: number;
+            thinking?: components["schemas"]["StabilityThinking"];
+        };
+        /**
+         * @description 思考控制。default 不干预（不发任何思考参数）；auto 预检时自动探测：模型默认不思考就什么都不发，否则按协议候选顺序逐个试， 采用第一个「上游收下且不再思考」的写法，全都关不掉就按渠道默认测（可能该模型官方就不支持关思考）； 其余为指定写法：thinking_disabled = thinking.type=disabled（DeepSeek/GLM/Kimi/豆包/Anthropic）、 reasoning_effort_none / reasoning_effort_minimal = chat 的 reasoning_effort 或 responses 的 reasoning.effort （OpenAI/Gemini/DeepSeek；minimal 只减不关）、enable_thinking_false = enable_thinking=false（通义千问）、 chat_template_kwargs = chat_template_kwargs.enable_thinking=false（vLLM/SGLang 自部署）、 reasoning_enabled_false = reasoning.enabled=false（OpenRouter）。anthropic 协议只适用 thinking_disabled。 指定写法被上游拒收时预检会剔除它，模型会思考的话再自动探测其余写法，结果在报告注明
+         * @default default
+         * @enum {string}
+         */
+        StabilityThinking: "default" | "auto" | "thinking_disabled" | "reasoning_effort_none" | "reasoning_effort_minimal" | "enable_thinking_false" | "chat_template_kwargs" | "reasoning_enabled_false";
+        /** @description 请求兼容选项（三个检测项共用）。默认全自动：任务开头的预检按上游实际反应调整请求形态（报错点名某字段就针对性剔除或换写法， 没点名就逐项剔除可选部分），调整写进报告；只有认证/模型/路径类错误才中止任务 */
+        StabilityCompat: {
+            /**
+             * @description 生成上限字段（仅 openai_chat）。auto = 先发 max_tokens，上游要求 max_completion_tokens（OpenAI 推理模型）时自动改用
+             * @default auto
+             * @enum {string}
+             */
+            maxTokensField: "auto" | "max_tokens" | "max_completion_tokens";
+            /**
+             * @description 流式尾帧 usage（仅 openai_chat 的 stream_options.include_usage）。auto = 发，上游不认识时自动去掉；off 时拿不到 usage 的渠道无法定标、偏差缺测
+             * @default auto
+             * @enum {string}
+             */
+            streamUsage: "auto" | "on" | "off";
+            /**
+             * @description openai_chat 也给共享前缀打 cache_control 断点（OpenRouter→Claude/Gemini、阿里云显式缓存需要）；缺省走自动前缀缓存直接拼接
+             * @default false
+             */
+            chatCacheControl: boolean;
+            /** @description 并进请求体顶层的自定义字段（如 vLLM/SGLang 的 ignore_eos、temperature、厂商私有参数），同名覆盖思考控制的字段；不能覆盖 model/messages/input/stream/各生成上限字段 */
+            extraBody?: {
+                [key: string]: unknown;
+            };
+            /** @description 追加的请求头（同名覆盖认证头）；会明文存进任务快照，不要放密钥 */
+            extraHeaders?: {
+                [key: string]: string;
+            };
+        };
+        /** @description 预检结论：任务开头按上游实际反应定下的请求形态、做过的兼容调整、关思考探测结果 */
+        StabilityPreflight: {
+            /** @description 预检共发请求数（含自适应重发与关思考试探） */
+            requests: number;
+            /** @description 预检请求拿到了 HTTP 200 */
+            passed: boolean;
+            /** @description 未通过时最后一次的错误（限流/5xx/断流，照常往下跑） */
+            detail?: string;
+            /** @description 上游响应是否带 usage */
+            usageReported: boolean;
+            /** @description 上游无视 stream=true 回整块 JSON（首增量/首字测不到） */
+            nonStream?: boolean;
+            /** @description 预检请求里模型有没有思考 */
+            reasoning: boolean;
+            /** @description 最终采用的关思考写法 ID；缺省 = 不发思考参数 */
+            thinking?: string;
+            /** @description 该写法实发的字段原文 */
+            thinkingField?: string;
+            /** @description 自动探测逐个试的结果 */
+            trials?: components["schemas"]["StabilityThinkingTrial"][];
+            /** @description 按上游报错做的兼容调整（人话） */
+            adjustments?: string[];
+        };
+        StabilityThinkingTrial: {
+            variant: string;
+            /** @description 实发字段原文 */
+            field: string;
+            /**
+             * @description disabled 关掉了（采用）/ still_reasoning 收下了但照样思考 / rejected 上游 4xx 拒收 / failed 限流或 5xx 等无法判断
+             * @enum {string}
+             */
+            outcome: "disabled" | "still_reasoning" | "rejected" | "failed";
+            /** @description rejected/failed 时的上游报错 */
+            detail?: string;
+        };
         /** @description 稳定性任务参数：实选协议 + 各 probe 档位 + 全局成本硬闸 */
         StabilityTaskParams: {
             /** @description 本任务实选协议（写入快照；须为渠道声明协议之一） */
             protocol?: components["schemas"]["Protocol"];
+            workload?: components["schemas"]["StabilityWorkload"];
+            compat?: components["schemas"]["StabilityCompat"];
             /**
              * @description 阶梯并发的并发档序列（闭环）
              * @default [
@@ -1119,11 +1216,6 @@ export interface components {
              */
             warmupPerStage: number;
             /**
-             * @description 每请求生成上限（max_tokens）；推理模型先思考再写正文，太小会被思考占满、测不到 TTFT
-             * @default 2048
-             */
-            ladderMaxTokens: number;
-            /**
              * @description RPM 实测起始到达率（req/s，开环）
              * @default 2
              */
@@ -1143,11 +1235,6 @@ export interface components {
              * @default 128
              */
             rpmMaxInFlight: number;
-            /**
-             * @description RPM 每请求生成上限（只关心请求速率，取小）
-             * @default 16
-             */
-            rpmMaxTokens: number;
             /**
              * @description 判定某档触发限速的 429 占比阈值（0-1）
              * @default 0.1
@@ -1178,11 +1265,6 @@ export interface components {
              * @default 128
              */
             tpmMaxInFlight: number;
-            /**
-             * @description TPM 每请求 max_tokens 砝码（顶格数数 prompt 保证打满输出；输入+输出都计）
-             * @default 256
-             */
-            tpmMaxTokensPerReq: number;
             /**
              * @description 判定某档触发限速的 429 占比阈值（0-1）
              * @default 0.1
@@ -1255,6 +1337,39 @@ export interface components {
             max: number;
             avg: number;
         };
+        /** @description 目标 vs 实测 token 的相对偏差分布（%，正 = 实测多于目标） */
+        StabilityDeviation: {
+            /** @description 参与统计的样本数（正常应答且有 usage） */
+            samples: number;
+            p50: number;
+            min: number;
+            max: number;
+            /** @description |偏差| 的 p95 */
+            absP95: number;
+            /** @description |偏差| p95 超过 ±10% */
+            exceeded: boolean;
+        };
+        /** @description 负载画像定标：任务开始先发一条固定字符数的填充请求，读 prompt_tokens 得实测字符/token 比，后续请求按此比例凑长度 */
+        StabilityCalibration: {
+            /** @description 定标填充字符数 */
+            chars: number;
+            /** @description 定标请求实测 prompt_tokens */
+            promptTokens: number;
+            /** @description 名义字符/token 比 */
+            nominalRatio: number;
+            /** @description 实测字符/token 比 */
+            measuredRatio: number;
+            /** @description 实测比相对名义比的偏差（%） */
+            deviationPct: number;
+            /** @description 共享前缀目标 token 数（缓存命中率 >0 时有） */
+            sharedTokens?: number;
+            /** @description 写缓存预热的第二条请求实测 cached_tokens（验证共享前缀已写入渠道缓存；上游不报缓存字段时缺省） */
+            cacheWarmCached?: number;
+            /** @description 定标没测成（上游不报 usage / 定标请求失败 / 计量异常）：按名义比塑形照跑，输入偏差无从实测或不准 */
+            uncalibrated?: boolean;
+            /** @description 没测成的原因 */
+            reason?: string;
+        };
         /** @description 一个（probe×档位）的指标集 */
         StabilityMetrics: {
             /** @description 计入统计的请求数（已剔除预热） */
@@ -1304,6 +1419,22 @@ export interface components {
             achievedTokenRate?: number;
             /** @description __overall__ TPM 收敛的可持续边界（token/分钟） */
             convergedTpm?: number;
+            /** @description 目标输入 vs 实测 prompt_tokens 的相对偏差分布（仅输入塑形时有） */
+            inputDeviation?: components["schemas"]["StabilityDeviation"];
+            /** @description 目标输出 vs 实测 completion_tokens 的相对偏差分布（仅有输出目标时有） */
+            outputDeviation?: components["schemas"]["StabilityDeviation"];
+            /** @description 实测缓存命中率 = Σcached_tokens / Σinput_tokens（正常应答样本；仅目标命中率 >0 时有） */
+            cacheHitRate?: number;
+            /** @description 目标缓存命中率 h（仅 >0 时有） */
+            cacheExpected?: number;
+            /** @description 实测命中率偏离目标超过 ±0.10（渠道缓存未按预期命中） */
+            cacheMiss?: boolean;
+            /** @description 正常应答中出现推理的条数（推理增量 / 正文开头的 think 段 / usage 报了推理 token / 输出上限被思考用完；请求关闭思考时据此判断是否关掉） */
+            reasoningSeen?: number;
+            /** @description __overall__ 预检结论（请求形态的兼容调整、关思考探测） */
+            preflight?: components["schemas"]["StabilityPreflight"];
+            /** @description __overall__ 负载画像定标结果（仅输入塑形时有） */
+            calibration?: components["schemas"]["StabilityCalibration"];
             /** @description 最近一次响应携带的限速头快照（x-ratelimit-*\/anthropic-ratelimit-*\/retry-after） */
             rateLimitHeaders?: {
                 [key: string]: string;
@@ -1354,8 +1485,14 @@ export interface components {
             totalMs?: number;
             inputTokens?: number;
             outputTokens?: number;
-            /** @description 输入中命中缓存的 token 数 */
+            /** @description 输入中命中缓存的 token 数（上游不报缓存字段时缺省） */
             cachedTokens?: number;
+            /** @description 本条请求的目标输入 token（仅输入塑形时有） */
+            targetInputTokens?: number;
+            /** @description 本条请求的目标输出 token（有输出目标时有） */
+            targetOutputTokens?: number;
+            /** @description usage 明细里的推理 token（无 usage 缺省；渠道不报为 0） */
+            reasoningTokens?: number;
             warmup: boolean;
         };
         /** @description 证据链自足的 JSON 导出：任务快照 + 指标报告 + 全量逐请求样本 */

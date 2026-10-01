@@ -10,8 +10,6 @@ import (
 
 const (
 	rpmProbeID = "rpm_probe"
-	// rpmPrompt 固定小 prompt：RPM 只关心请求到达率，生成量取小（RpmMaxTokens）即可
-	rpmPrompt = "用一句话简要介绍你自己。"
 	// rpmRateTol 二分收敛精度：档间速率差窄于此即停（≈30 RPM 分辨率）
 	rpmRateTol = 0.5
 )
@@ -113,8 +111,7 @@ func runRpm(ctx context.Context, in RunInput) error {
 		stage := rpmStageLabel(rate)
 		cfg := pacedStageConfig{
 			TargetRate:  rate,
-			MaxTokens:   p.RpmMaxTokens,
-			Prompt:      rpmPrompt,
+			Output:      rpmOutput, // RPM 只关心请求到达率，未设输出目标时生成量取小
 			Duration:    stageDur,
 			Warmup:      stageDur / 2, // 前一半热身，只用后一半判定（见 pacedStageConfig.Warmup）
 			MaxInFlight: p.RpmMaxInFlight,
@@ -132,11 +129,9 @@ func runRpm(ctx context.Context, in RunInput) error {
 		if res.RateHeaders != nil {
 			lastHeaders = res.RateHeaders
 		}
-		sm := evaluatePacedStage(in.Probe, stage, stageIndex, rate, achieved, limited, res.RateHeaders, res.Samples)
-		if in.Metric != nil {
-			if err := in.Metric(ctx, sm); err != nil {
-				return stageOutcome{}, err
-			}
+		sm := evaluatePacedStage(in.Probe, stage, stageIndex, p.Workload.CacheHitRate, rate, achieved, limited, res.RateHeaders, res.Samples)
+		if err := in.emit(ctx, sm); err != nil {
+			return stageOutcome{}, err
 		}
 		overall = append(overall, judged...)
 		stageIndex++
@@ -147,11 +142,5 @@ func runRpm(ctx context.Context, in RunInput) error {
 	if err != nil {
 		return err
 	}
-	om := evaluateRpmOverall(in.Probe, overall, b, p.RpmMaxRate, in.Caps.Reason(), lastHeaders)
-	if in.Metric != nil {
-		if err := in.Metric(ctx, om); err != nil {
-			return err
-		}
-	}
-	return nil
+	return in.emit(ctx, evaluateRpmOverall(in.Probe, p.Workload.CacheHitRate, overall, b, p.RpmMaxRate, in.Caps.Reason(), lastHeaders))
 }

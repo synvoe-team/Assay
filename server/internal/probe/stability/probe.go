@@ -36,6 +36,8 @@ type RunInput struct {
 	// 让整个任务内无两条请求字节相同——破渠道的整条响应缓存/去重，否则 TTFT 不真实
 	Nonce  string
 	Params StabilityParams
+	// Plan 准备期（PrepareWorkload）产出的字符/token 比与共享前缀；不塑形时为零值
+	Plan   Plan
 	Client *http.Client
 	Codec  protocol.Codec
 	Caps   *CapGuard // 全局硬闸（跨 probe 共享），nil = 不限
@@ -72,7 +74,12 @@ type Sample struct {
 
 	InputTokens  int // <0 = 无 usage → NULL
 	OutputTokens int // <0 = 无 usage → NULL
-	CachedTokens int // 输入中命中缓存的 token；<0 = 无 usage → NULL
+	CachedTokens int // 输入中命中缓存的 token；<0 = 无 usage 或上游不报缓存字段 → NULL
+	// ReasoningTokens 输出中的推理 token（usage 明细）；<0 = 无 usage → NULL。隐藏推理的模型只有这一个信号
+	ReasoningTokens int
+
+	TargetInputTokens  int // 负载画像的输入 token 目标；0 = 不塑形 → NULL
+	TargetOutputTokens int // 输出 token 目标；0 = 无目标 → NULL
 }
 
 // 错误分类（与迁移 check 约束一致）
@@ -127,8 +134,24 @@ type Metrics struct {
 	// BudgetExhausted 输出上限被思考用完、没写出正文的条数：渠道正常应答，不计入 Errors；
 	// 这些请求测不到 TTFT，阶梯并发里 >0 即提示调大输出上限
 	BudgetExhausted int `json:"budgetExhausted,omitempty"`
-	// CacheHits 输入命中缓存的成功条数：不进延迟分位（缓存命中的 TTFT 不代表渠道真实 prefill）
+	// CacheHits 输入命中缓存的正常应答条数。h=0 时是意外命中，不进延迟分位（TTFT 不代表渠道真实 prefill）；
+	// h>0 时命中是负载画像的一部分，照常计入
 	CacheHits int `json:"cacheHits,omitempty"`
+
+	// —— 负载画像（不塑形 / 无目标时留空）——
+	InputDeviation  *Deviation `json:"inputDeviation,omitempty"`  // 目标输入 vs 实测 prompt_tokens
+	OutputDeviation *Deviation `json:"outputDeviation,omitempty"` // 目标输出 vs 实测 completion
+	// CacheHitRate 实测命中率 Σcached/Σinput（仅 h>0 时算，只取上游报了缓存字段的样本）；偏离目标 CacheExpected
+	// 超容差 → CacheMiss。上游压根不报缓存字段时为空（无从判断，不当未命中）
+	CacheHitRate  *float64 `json:"cacheHitRate,omitempty"`
+	CacheExpected float64  `json:"cacheExpected,omitempty"`
+	CacheMiss     bool     `json:"cacheMiss,omitempty"`
+	// ReasoningSeen 正常应答里出现推理的条数（首增量早于首正文、usage 报了推理 token，或输出上限被思考用完）
+	ReasoningSeen int `json:"reasoningSeen,omitempty"`
+	// Preflight 预检结论（仅 __overall__）：上游实际接受的请求形态、做过的兼容调整、关思考探测结果
+	Preflight *Preflight `json:"preflight,omitempty"`
+	// Calibration 定标结果（仅 __overall__）
+	Calibration *Calibration `json:"calibration,omitempty"`
 
 	ThroughputRps float64 `json:"throughputRps,omitempty"`
 	TokensPerSec  float64 `json:"tokensPerSec,omitempty"`
@@ -158,6 +181,16 @@ type Metrics struct {
 	RateLimitHeaders map[string]string `json:"rateLimitHeaders,omitempty"`
 }
 
+// Deviation 目标 vs 实测 token 的偏差分布（百分比，正 = 实测多于目标）
+type Deviation struct {
+	Samples  int     `json:"samples"`
+	P50      float64 `json:"p50"`
+	Min      float64 `json:"min"`
+	Max      float64 `json:"max"`
+	AbsP95   float64 `json:"absP95"`   // |偏差| 的 p95
+	Exceeded bool    `json:"exceeded"` // AbsP95 超过 ±10% 阈值
+}
+
 // StageMetrics 一档评估结果 + 定位信息，worker 据此落 stability_metrics。
 type StageMetrics struct {
 	Probe      string
@@ -174,7 +207,8 @@ const (
 )
 
 // CapGuard 全局成本硬闸：跨 probe 累计请求数、token 数并限定整任务墙钟时长，碰任一上限即令 probe 收敛停止。
-// 尽力而为上界（并发下可能略微超出被占用的那一批），非精确配额；墙钟到点只停派新请求，在途的跑完。
+// token 按「输入目标 + 输出目标」在派发前预扣、出结果后按实测补差：大输入时在途一批不会把总 token 冲穿。
+// 尽力而为上界（检查与预扣之间无锁），非精确配额；墙钟到点只停派新请求，在途的跑完。
 type CapGuard struct {
 	maxReq   int64
 	maxTok   int64
@@ -201,19 +235,20 @@ func NewCapGuard(maxReq, maxTok int, maxDur time.Duration) *CapGuard {
 	return c
 }
 
-// Reserve 占用一个请求配额；返回 false 表示已撞某道闸（时长/token/请求数），不应再发。
-func (c *CapGuard) Reserve() bool {
+// Reserve 占用一个请求配额并预扣 est 个名义 token；返回 false 表示已撞某道闸（时长/token/请求数），不应再发。
+func (c *CapGuard) Reserve(est int64) bool {
 	if c == nil {
 		return true
 	}
 	switch {
 	case !c.deadline.IsZero() && time.Now().After(c.deadline):
 		return c.trip(CapDuration)
-	case atomic.LoadInt64(&c.toks) > c.maxTok:
+	case atomic.LoadInt64(&c.toks)+est > c.maxTok:
 		return c.trip(CapTokens)
 	case atomic.AddInt64(&c.reqs, 1) > c.maxReq:
 		return c.trip(CapRequests)
 	}
+	atomic.AddInt64(&c.toks, est)
 	return true
 }
 
@@ -234,10 +269,10 @@ func (c *CapGuard) Reason() string {
 	return ""
 }
 
-// AddTokens 累加实际消耗 token
-func (c *CapGuard) AddTokens(n int64) {
-	if c == nil || n <= 0 {
+// Settle 请求结束后按实测消耗补差（actual − 预扣的 est；actual=0 即全额退回）
+func (c *CapGuard) Settle(est, actual int64) {
+	if c == nil {
 		return
 	}
-	atomic.AddInt64(&c.toks, n)
+	atomic.AddInt64(&c.toks, actual-est)
 }

@@ -7,40 +7,61 @@ import (
 )
 
 // TestLoadBodyGolden 锁死三协议请求体的字节级形态（byte-exact 铁律：payload 不得二次序列化）。
+// 无共享前缀、不关思考时与负载画像上线前逐字节一致。
 func TestLoadBodyGolden(t *testing.T) {
 	cases := []struct {
-		proto     string
-		model     string
-		content   string
-		maxTokens int
-		want      string
+		name  string
+		proto string
+		load  Load
+		want  string
 	}{
 		{
-			proto: ProtocolOpenAIChat, model: "gpt-4", content: "ping", maxTokens: 4,
+			name: "chat", proto: ProtocolOpenAIChat,
+			load: Load{Model: "gpt-4", Prompt: Prompt{Unique: "ping"}, MaxTokens: 4},
 			want: `{"model":"gpt-4","messages":[{"role":"user","content":"ping"}],"max_tokens":4,"stream":true,"stream_options":{"include_usage":true}}`,
 		},
 		{
 			// max_output_tokens 低于下限 16 应被抬到 16
-			proto: ProtocolOpenAIResponses, model: "gpt-4", content: "ping", maxTokens: 4,
+			name: "responses", proto: ProtocolOpenAIResponses,
+			load: Load{Model: "gpt-4", Prompt: Prompt{Unique: "ping"}, MaxTokens: 4},
 			want: `{"model":"gpt-4","input":"ping","max_output_tokens":16,"stream":true}`,
 		},
 		{
-			proto: ProtocolAnthropicMessages, model: "claude-3", content: "ping", maxTokens: 4,
+			name: "anthropic", proto: ProtocolAnthropicMessages,
+			load: Load{Model: "claude-3", Prompt: Prompt{Unique: "ping"}, MaxTokens: 4},
 			want: `{"model":"claude-3","max_tokens":4,"messages":[{"role":"user","content":"ping"}],"stream":true}`,
 		},
 		{
 			// 特殊字符不做 HTML 转义（MarshalNoEscape 保字节保真）
-			proto: ProtocolOpenAIChat, model: "m", content: "a<b>&c", maxTokens: 32,
+			name: "chat 特殊字符", proto: ProtocolOpenAIChat,
+			load: Load{Model: "m", Prompt: Prompt{Unique: "a<b>&c"}, MaxTokens: 32},
 			want: `{"model":"m","messages":[{"role":"user","content":"a<b>&c"}],"max_tokens":32,"stream":true,"stream_options":{"include_usage":true}}`,
+		},
+		{
+			// 自动前缀缓存的协议：共享前缀直接拼在最前面
+			name: "chat 共享前缀", proto: ProtocolOpenAIChat,
+			load: Load{Model: "m", Prompt: Prompt{Shared: "SSS\n\n", Unique: "[n c1-0] q"}, MaxTokens: 8},
+			want: `{"model":"m","messages":[{"role":"user","content":"SSS\n\n[n c1-0] q"}],"max_tokens":8,"stream":true,"stream_options":{"include_usage":true}}`,
+		},
+		{
+			name: "responses 共享前缀", proto: ProtocolOpenAIResponses,
+			load: Load{Model: "m", Prompt: Prompt{Shared: "SSS", Unique: "U"}, MaxTokens: 32},
+			want: `{"model":"m","input":"SSSU","max_output_tokens":32,"stream":true}`,
+		},
+		{
+			// Anthropic 只缓存显式断点之前的内容：共享前缀单独成块并带 cache_control
+			name: "anthropic 共享前缀", proto: ProtocolAnthropicMessages,
+			load: Load{Model: "c", Prompt: Prompt{Shared: "SSS", Unique: "U"}, MaxTokens: 8},
+			want: `{"model":"c","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":"SSS","cache_control":{"type":"ephemeral"}},{"type":"text","text":"U"}]}],"stream":true}`,
 		},
 	}
 	for _, tc := range cases {
-		t.Run(tc.proto+"/"+tc.model, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			c, ok := Get(tc.proto)
 			if !ok {
 				t.Fatalf("协议未注册: %s", tc.proto)
 			}
-			got, err := c.LoadBody(tc.model, tc.content, tc.maxTokens)
+			got, err := c.LoadBody(tc.load)
 			if err != nil {
 				t.Fatalf("LoadBody 出错: %v", err)
 			}
@@ -48,6 +69,12 @@ func TestLoadBodyGolden(t *testing.T) {
 				t.Errorf("请求体不符\n got: %s\nwant: %s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPromptText(t *testing.T) {
+	if got := (Prompt{Shared: "ab", Unique: "cd"}).Text(); got != "abcd" {
+		t.Errorf("Text()=%q", got)
 	}
 }
 
@@ -269,7 +296,8 @@ data: {"type":"message_stop"}
 	}
 }
 
-// TestScanStreamCached 三协议缓存命中 token 提取（断言破缓存用）
+// TestScanStreamCached 三协议缓存命中 token 提取，且 Prompt 统一为「含缓存的总输入」：
+// openai 两协议的 prompt/input_tokens 本就含 cached；anthropic 的 input_tokens 不含缓存读写，须加回
 func TestScanStreamCached(t *testing.T) {
 	cases := []struct{ name, proto, stream string }{
 		{"chat prompt_tokens_details", ProtocolOpenAIChat, `data: {"choices":[{"delta":{"content":"a"},"finish_reason":"stop"}]}
@@ -288,6 +316,12 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 
 data: {"type":"message_stop"}
 `},
+		{"anthropic 缓存读写都要加回总输入", ProtocolAnthropicMessages, `data: {"type":"message_start","message":{"usage":{"input_tokens":1,"cache_creation_input_tokens":2,"cache_read_input_tokens":7,"output_tokens":1}}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"a"}}
+
+data: {"type":"message_stop"}
+`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -295,8 +329,8 @@ data: {"type":"message_stop"}
 			if err != nil {
 				t.Fatalf("出错: %v", err)
 			}
-			if r.Usage.Cached != 7 {
-				t.Errorf("Cached=%d，期望 7", r.Usage.Cached)
+			if r.Usage.Cached != 7 || r.Usage.Prompt != 10 {
+				t.Errorf("Cached/Prompt=%d/%d，期望 7/10（Prompt 为含缓存的总输入）", r.Usage.Cached, r.Usage.Prompt)
 			}
 		})
 	}

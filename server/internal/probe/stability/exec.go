@@ -1,6 +1,7 @@
 package stability
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -30,6 +31,8 @@ type outcome struct {
 	HasBody bool // 拿到 200 并读过响应体（TTFB/Total 有意义）
 
 	Usage     protocol.Usage
+	Reasoned  bool        // 出现过推理（推理增量 / 正文开头的 <think> 段 / usage 报了推理 token）
+	NonStream bool        // 上游无视 stream=true 回了整块 JSON：正文与 usage 照取，首增量/首字测不到
 	HTTPProto string      // 实际协商的协议版本（resp.Proto，如 HTTP/1.1）
 	Header    http.Header // 所有响应都留存，供 RPM probe 读限速头（2xx 也带余量头）
 }
@@ -53,9 +56,9 @@ func (t *timingReader) Read(p []byte) (int, error) {
 
 // doRequest 发一次最小压测请求并观测时序 + usage。
 // TTFB 由 timingReader 打点、TTFD/TTFT 由 codec 的两个钩子打点、total 为整流耗时。
-func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, baseURL, apiKey, model, content string, maxTokens, timeoutMs int) outcome {
+func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, baseURL, apiKey string, load protocol.Load, timeoutMs int) outcome {
 	var o outcome
-	body, err := codec.LoadBody(model, content, maxTokens)
+	body, err := codec.LoadBody(load)
 	if err != nil {
 		o.ErrorClass = ErrTransport
 		o.Error = "构造请求失败: " + err.Error()
@@ -71,6 +74,7 @@ func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, b
 	}
 	req.Header.Set("Content-Type", "application/json")
 	codec.Auth(req, apiKey)
+	load.Shape.ApplyHeaders(req, apiKey)
 
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -100,30 +104,60 @@ func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, b
 	}
 
 	tr := &timingReader{r: resp.Body, start: start}
-	res, err := codec.ScanStream(tr, protocol.Hooks{
-		OnFirstDelta: func() {
-			o.TTFD = time.Since(start)
-			o.HasTTFD = true
-		},
-		OnFirstContent: func() {
-			o.TTFT = time.Since(start)
-			o.HasTTFT = true
-		},
-	})
+	br := bufio.NewReaderSize(tr, 64*1024)
+	var res protocol.Result
+	if o.NonStream = jsonBody(br); o.NonStream {
+		raw, rerr := io.ReadAll(io.LimitReader(br, maxJSONBody))
+		if err = rerr; err == nil {
+			res, err = codec.ParseBody(raw)
+		}
+	} else {
+		res, err = codec.ScanStream(br, protocol.Hooks{
+			OnFirstDelta: func() {
+				o.TTFD = time.Since(start)
+				o.HasTTFD = true
+			},
+			OnFirstContent: func() {
+				o.TTFT = time.Since(start)
+				o.HasTTFT = true
+			},
+		})
+	}
 	o.Total = time.Since(start)
 	o.HasBody = true
 	if tr.got {
 		o.TTFB = tr.ttfb
 	}
 	o.Usage = res.Usage
+	o.Reasoned = res.SawReasoning || res.Usage.Reasoning > 0
 	if err != nil {
 		o.ErrorClass = ErrStreamAnomaly
 		o.Error = "读取响应流失败: " + truncateOneLine(err.Error())
 		return o
 	}
-	o.ErrorClass, o.Error = classifyStream(res, maxTokens)
+	o.ErrorClass, o.Error = classifyStream(res, load.MaxTokens)
 	o.Ok = o.ErrorClass == ""
 	return o
+}
+
+// maxJSONBody 非流式整块响应的读取上限
+const maxJSONBody = 16 << 20
+
+// jsonBody 上游是否无视 stream=true 回了整块 JSON：跳过前导空白（DeepSeek 排队时先发空行保活）后
+// 首字节是 '{' 即是；SSE 以 data:/event:/: 注释开头。按内容判断而非 Content-Type（不少中转乱标）。
+func jsonBody(br *bufio.Reader) bool {
+	for {
+		b, err := br.Peek(1)
+		if err != nil || len(b) == 0 {
+			return false
+		}
+		switch b[0] {
+		case ' ', '\t', '\r', '\n':
+			_, _ = br.Discard(1)
+		default:
+			return b[0] == '{'
+		}
+	}
 }
 
 // classifyStream HTTP 200 且流扫描无错之后的判定，返回空分类 = 成功。顺序即优先级：
@@ -162,11 +196,11 @@ func classifyHTTP(status int) string {
 // sampleFrom outcome → Sample：测到什么记什么，没测到的取负值（落库转 NULL）。
 // 失败但拿到 200 的样本（预算耗尽/只有推理/断流）也保留时序与计量，作证据链；
 // 评估期的延迟分位与吞吐只取成功样本，不受影响。
-func sampleFrom(stage string, stageIndex, seq int, warmup bool, dispatchedAt time.Time, proto string, o outcome) Sample {
+func sampleFrom(sp reqSpec, stageIndex int, warmup bool, dispatchedAt time.Time, proto string, o outcome) Sample {
 	s := Sample{
-		Stage:        stage,
+		Stage:        sp.Stage,
 		StageIndex:   stageIndex,
-		Seq:          seq,
+		Seq:          sp.Seq,
 		Protocol:     proto,
 		DispatchedAt: dispatchedAt,
 		Warmup:       warmup,
@@ -182,6 +216,11 @@ func sampleFrom(stage string, stageIndex, seq int, warmup bool, dispatchedAt tim
 		InputTokens:  -1,
 		OutputTokens: -1,
 		CachedTokens: -1,
+
+		ReasoningTokens: -1,
+
+		TargetInputTokens:  sp.TargetInput,
+		TargetOutputTokens: sp.TargetOutput,
 	}
 	if o.HasBody {
 		s.TTFBms = int(o.TTFB.Milliseconds())
@@ -196,13 +235,17 @@ func sampleFrom(stage string, stageIndex, seq int, warmup bool, dispatchedAt tim
 	if o.Usage.Ok {
 		s.InputTokens = int(o.Usage.Prompt)
 		s.OutputTokens = int(o.Usage.Completion)
-		s.CachedTokens = int(o.Usage.Cached)
+		s.ReasoningTokens = int(o.Usage.Reasoning)
+		if o.Usage.CachedOk {
+			s.CachedTokens = int(o.Usage.Cached)
+		}
 	}
 	return s
 }
 
-// uniquePrompt 给压测 prompt 拼唯一前缀「[nonce 档位-序号] 」。前缀放最前面：
-// 前缀缓存按开头匹配，开头不同才破得掉；档位标签各 probe 互异（c/r/t 开头），任务内必唯一。
+// uniquePrompt 给压测 prompt 拼唯一标记「[nonce 档位-序号] 」。标记放在唯一段最前面：
+// 前缀缓存按开头匹配，开头不同才破得掉（h>0 时紧跟共享前缀之后，缓存恰好止于共享前缀）；
+// 档位标签各 probe 互异（c/r/t 开头），任务内必唯一。
 func uniquePrompt(nonce, stage string, seq int, base string) string {
 	return fmt.Sprintf("[%s %s-%d] %s", nonce, stage, seq, base)
 }

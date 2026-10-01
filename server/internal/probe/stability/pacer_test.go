@@ -69,7 +69,7 @@ func pacerInput(baseURL string, caps *CapGuard, sample func(Sample)) RunInput {
 func TestPacer_ArrivalRate(t *testing.T) {
 	srv, _ := sseChatServer(t, 0, nil)
 	in := pacerInput(srv.URL, nil, nil)
-	cfg := pacedStageConfig{TargetRate: 100, MaxTokens: 16, Prompt: "hi", Duration: 300 * time.Millisecond, MaxInFlight: 256}
+	cfg := pacedStageConfig{TargetRate: 100, Output: rpmOutput, Duration: 300 * time.Millisecond, MaxInFlight: 256}
 
 	res, err := runPacedStage(context.Background(), in, 0, "r100", cfg, nil)
 	if err != nil {
@@ -92,7 +92,7 @@ func TestPacer_HardGateRequests(t *testing.T) {
 	srv, _ := sseChatServer(t, 0, nil)
 	caps := NewCapGuard(5, 0, 0)
 	in := pacerInput(srv.URL, caps, nil)
-	cfg := pacedStageConfig{TargetRate: 200, MaxTokens: 16, Prompt: "hi", Duration: 2 * time.Second, MaxInFlight: 256}
+	cfg := pacedStageConfig{TargetRate: 200, Output: rpmOutput, Duration: 2 * time.Second, MaxInFlight: 256}
 
 	res, err := runPacedStage(context.Background(), in, 0, "r200", cfg, nil)
 	if err != nil {
@@ -111,7 +111,7 @@ func TestPacer_CoordinatedOmission(t *testing.T) {
 	// 上游每请求慢 50ms，但排定间距应仍为 10ms（1/100）——证明 dispatched_at 用排定时刻而非起飞时刻
 	srv, _ := sseChatServer(t, 50*time.Millisecond, nil)
 	in := pacerInput(srv.URL, nil, nil)
-	cfg := pacedStageConfig{TargetRate: 100, MaxTokens: 16, Prompt: "hi", Duration: 200 * time.Millisecond, MaxInFlight: 512}
+	cfg := pacedStageConfig{TargetRate: 100, Output: rpmOutput, Duration: 200 * time.Millisecond, MaxInFlight: 512}
 
 	res, err := runPacedStage(context.Background(), in, 0, "r100", cfg, nil)
 	if err != nil {
@@ -143,7 +143,7 @@ func TestPacer_InFlightCap(t *testing.T) {
 	srv, _ := sseChatServer(t, 100*time.Millisecond, nil)
 	in := pacerInput(srv.URL, nil, nil)
 	// 目标 500/s，但在途封顶 4 + 每请求 100ms → 稳态最多 ~4 在途，派发被背压远低于 500×0.3=150
-	cfg := pacedStageConfig{TargetRate: 500, MaxTokens: 16, Prompt: "hi", Duration: 300 * time.Millisecond, MaxInFlight: 4}
+	cfg := pacedStageConfig{TargetRate: 500, Output: rpmOutput, Duration: 300 * time.Millisecond, MaxInFlight: 4}
 
 	res, err := runPacedStage(context.Background(), in, 0, "r500", cfg, nil)
 	if err != nil {
@@ -158,7 +158,7 @@ func TestPacer_InFlightCap(t *testing.T) {
 func TestPacer_WarmupMarksEarlySamples(t *testing.T) {
 	srv, _ := sseChatServer(t, 0, nil)
 	in := pacerInput(srv.URL, nil, nil)
-	cfg := pacedStageConfig{TargetRate: 50, MaxTokens: 16, Prompt: "hi", Duration: 400 * time.Millisecond, Warmup: 200 * time.Millisecond, MaxInFlight: 256}
+	cfg := pacedStageConfig{TargetRate: 50, Output: rpmOutput, Duration: 400 * time.Millisecond, Warmup: 200 * time.Millisecond, MaxInFlight: 256}
 
 	res, err := runPacedStage(context.Background(), in, 0, "r50", cfg, nil)
 	if err != nil {

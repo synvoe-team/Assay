@@ -83,7 +83,7 @@ data: [DONE]
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := replayServer(t, tc.body)
-			o := doRequest(context.Background(), srv.Client(), codec, srv.URL, "sk", "m", "ping", maxTokens, 5000)
+			o := doRequest(context.Background(), srv.Client(), codec, srv.URL, "sk", protocol.Load{Model: "m", Prompt: protocol.Prompt{Unique: "ping"}, MaxTokens: maxTokens}, 5000)
 			if o.Ok != tc.wantOk || o.ErrorClass != tc.wantClass {
 				t.Fatalf("Ok=%v class=%q，期望 Ok=%v class=%q（error=%q）", o.Ok, o.ErrorClass, tc.wantOk, tc.wantClass, o.Error)
 			}
@@ -108,14 +108,14 @@ data: {"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":5,"prompt_tok
 data: [DONE]
 `)
 	codec, _ := protocol.Get(protocol.ProtocolOpenAIChat)
-	o := doRequest(context.Background(), srv.Client(), codec, srv.URL, "sk", "m", "ping", 64, 5000)
+	o := doRequest(context.Background(), srv.Client(), codec, srv.URL, "sk", protocol.Load{Model: "m", Prompt: protocol.Prompt{Unique: "ping"}, MaxTokens: 64}, 5000)
 	if !o.Ok || !o.HasTTFD || !o.HasTTFT {
 		t.Fatalf("Ok=%v HasTTFD=%v HasTTFT=%v，期望均为 true（error=%q）", o.Ok, o.HasTTFD, o.HasTTFT, o.Error)
 	}
 	if o.TTFD > o.TTFT {
 		t.Errorf("TTFD=%v 不应晚于 TTFT=%v", o.TTFD, o.TTFT)
 	}
-	s := sampleFrom("c1", 0, 0, false, time.Now(), protocol.ProtocolOpenAIChat, o)
+	s := sampleFrom(reqSpec{Stage: "c1"}, 0, false, time.Now(), protocol.ProtocolOpenAIChat, o)
 	if s.CachedTokens != 4 || s.TTFDms < 0 || s.HTTPProto != "HTTP/1.1" {
 		t.Errorf("样本 CachedTokens=%d TTFDms=%d HTTPProto=%q", s.CachedTokens, s.TTFDms, s.HTTPProto)
 	}
@@ -132,8 +132,8 @@ data: {"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":64}}
 data: [DONE]
 `)
 	codec, _ := protocol.Get(protocol.ProtocolOpenAIChat)
-	o := doRequest(context.Background(), srv.Client(), codec, srv.URL, "sk", "m", "ping", 64, 5000)
-	s := sampleFrom("c1", 0, 0, false, time.Now(), protocol.ProtocolOpenAIChat, o)
+	o := doRequest(context.Background(), srv.Client(), codec, srv.URL, "sk", protocol.Load{Model: "m", Prompt: protocol.Prompt{Unique: "ping"}, MaxTokens: 64}, 5000)
+	s := sampleFrom(reqSpec{Stage: "c1"}, 0, false, time.Now(), protocol.ProtocolOpenAIChat, o)
 	if s.Ok || s.ErrorClass != ErrBudgetExhausted {
 		t.Fatalf("Ok=%v class=%q", s.Ok, s.ErrorClass)
 	}

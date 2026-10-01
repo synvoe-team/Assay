@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Assay API
   description: LLM 渠道检测平台 API。本文件是前后端契约的唯一真相源（契约优先）。
-  version: 0.14.1
+  version: 0.15.0
 servers:
   - url: /api
 paths:
@@ -1974,6 +1974,146 @@ components:
         estRequests:
           description: 按默认参数的最坏预估请求数（前端据实选参数自行重算展示）
           type: integer
+    StabilityWorkloadInput:
+      description: 每条压测请求的输入 token 目标。none=沿用小 prompt（不塑形）；fixed=固定目标；ramp=按本档排定顺序从 min 匀速涨到 max；jitter=[min,max] 内均匀随机（以任务 ID 做种，可复现）
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [none, fixed, ramp, jitter]
+          default: none
+        value:
+          description: fixed 模式的目标 token 数
+          type: integer
+          minimum: 1
+          maximum: 1000000
+        min:
+          description: ramp/jitter 区间下限
+          type: integer
+          minimum: 1
+          maximum: 1000000
+        max:
+          description: ramp/jitter 区间上限（须大于 min）
+          type: integer
+          minimum: 1
+          maximum: 1000000
+    StabilityWorkload:
+      description: 负载画像：控制每条压测请求的输入 token 数、缓存命中率、输出 token 数。全缺省 = 小输入、不共享前缀、输出沿用各检测项默认
+      type: object
+      properties:
+        input:
+          $ref: "#/components/schemas/StabilityWorkloadInput"
+        cacheHitRate:
+          description: 目标缓存命中率 h（0-0.95）；>0 时每条 prompt 以约 h×输入目标的任务内共享前缀开头，须配合输入塑形且共享前缀 ≥1024 token
+          type: number
+          minimum: 0
+          maximum: 0.95
+          default: 0
+        output:
+          description: 每请求输出 token 目标：max_tokens=该值并用顶格数数 prompt 诱导写满；缺省 = 各检测项默认（阶梯并发 2048 / RPM 16 / TPM 256）
+          type: integer
+          minimum: 1
+          maximum: 32768
+        thinking:
+          $ref: "#/components/schemas/StabilityThinking"
+    StabilityThinking:
+      description: >-
+        思考控制。default 不干预（不发任何思考参数）；auto 预检时自动探测：模型默认不思考就什么都不发，否则按协议候选顺序逐个试，
+        采用第一个「上游收下且不再思考」的写法，全都关不掉就按渠道默认测（可能该模型官方就不支持关思考）；
+        其余为指定写法：thinking_disabled = thinking.type=disabled（DeepSeek/GLM/Kimi/豆包/Anthropic）、
+        reasoning_effort_none / reasoning_effort_minimal = chat 的 reasoning_effort 或 responses 的 reasoning.effort
+        （OpenAI/Gemini/DeepSeek；minimal 只减不关）、enable_thinking_false = enable_thinking=false（通义千问）、
+        chat_template_kwargs = chat_template_kwargs.enable_thinking=false（vLLM/SGLang 自部署）、
+        reasoning_enabled_false = reasoning.enabled=false（OpenRouter）。anthropic 协议只适用 thinking_disabled。
+        指定写法被上游拒收时预检会剔除它，模型会思考的话再自动探测其余写法，结果在报告注明
+      type: string
+      enum: [default, auto, thinking_disabled, reasoning_effort_none, reasoning_effort_minimal, enable_thinking_false, chat_template_kwargs, reasoning_enabled_false]
+      default: default
+    StabilityCompat:
+      description: >-
+        请求兼容选项（三个检测项共用）。默认全自动：任务开头的预检按上游实际反应调整请求形态（报错点名某字段就针对性剔除或换写法，
+        没点名就逐项剔除可选部分），调整写进报告；只有认证/模型/路径类错误才中止任务
+      type: object
+      properties:
+        maxTokensField:
+          description: 生成上限字段（仅 openai_chat）。auto = 先发 max_tokens，上游要求 max_completion_tokens（OpenAI 推理模型）时自动改用
+          type: string
+          enum: [auto, max_tokens, max_completion_tokens]
+          default: auto
+        streamUsage:
+          description: 流式尾帧 usage（仅 openai_chat 的 stream_options.include_usage）。auto = 发，上游不认识时自动去掉；off 时拿不到 usage 的渠道无法定标、偏差缺测
+          type: string
+          enum: [auto, "on", "off"]
+          default: auto
+        chatCacheControl:
+          description: openai_chat 也给共享前缀打 cache_control 断点（OpenRouter→Claude/Gemini、阿里云显式缓存需要）；缺省走自动前缀缓存直接拼接
+          type: boolean
+          default: false
+        extraBody:
+          description: 并进请求体顶层的自定义字段（如 vLLM/SGLang 的 ignore_eos、temperature、厂商私有参数），同名覆盖思考控制的字段；不能覆盖 model/messages/input/stream/各生成上限字段
+          type: object
+          additionalProperties: true
+        extraHeaders:
+          description: 追加的请求头（同名覆盖认证头）；会明文存进任务快照，不要放密钥
+          type: object
+          additionalProperties:
+            type: string
+    StabilityPreflight:
+      description: 预检结论：任务开头按上游实际反应定下的请求形态、做过的兼容调整、关思考探测结果
+      type: object
+      required: [requests, passed, usageReported, reasoning]
+      properties:
+        requests:
+          description: 预检共发请求数（含自适应重发与关思考试探）
+          type: integer
+        passed:
+          description: 预检请求拿到了 HTTP 200
+          type: boolean
+        detail:
+          description: 未通过时最后一次的错误（限流/5xx/断流，照常往下跑）
+          type: string
+        usageReported:
+          description: 上游响应是否带 usage
+          type: boolean
+        nonStream:
+          description: 上游无视 stream=true 回整块 JSON（首增量/首字测不到）
+          type: boolean
+        reasoning:
+          description: 预检请求里模型有没有思考
+          type: boolean
+        thinking:
+          description: 最终采用的关思考写法 ID；缺省 = 不发思考参数
+          type: string
+        thinkingField:
+          description: 该写法实发的字段原文
+          type: string
+        trials:
+          description: 自动探测逐个试的结果
+          type: array
+          items:
+            $ref: "#/components/schemas/StabilityThinkingTrial"
+        adjustments:
+          description: 按上游报错做的兼容调整（人话）
+          type: array
+          items:
+            type: string
+    StabilityThinkingTrial:
+      type: object
+      required: [variant, field, outcome]
+      properties:
+        variant:
+          type: string
+        field:
+          description: 实发字段原文
+          type: string
+        outcome:
+          description: disabled 关掉了（采用）/ still_reasoning 收下了但照样思考 / rejected 上游 4xx 拒收 / failed 限流或 5xx 等无法判断
+          type: string
+          enum: [disabled, still_reasoning, rejected, failed]
+        detail:
+          description: rejected/failed 时的上游报错
+          type: string
     StabilityTaskParams:
       description: 稳定性任务参数：实选协议 + 各 probe 档位 + 全局成本硬闸
       type: object
@@ -1981,6 +2121,10 @@ components:
         protocol:
           description: 本任务实选协议（写入快照；须为渠道声明协议之一）
           $ref: "#/components/schemas/Protocol"
+        workload:
+          $ref: "#/components/schemas/StabilityWorkload"
+        compat:
+          $ref: "#/components/schemas/StabilityCompat"
         concurrencyLadder:
           description: 阶梯并发的并发档序列（闭环）
           type: array
@@ -2001,12 +2145,6 @@ components:
           minimum: 0
           maximum: 100
           default: 0
-        ladderMaxTokens:
-          description: 每请求生成上限（max_tokens）；推理模型先思考再写正文，太小会被思考占满、测不到 TTFT
-          type: integer
-          minimum: 1
-          maximum: 4096
-          default: 2048
         rpmStartRate:
           description: RPM 实测起始到达率（req/s，开环）
           type: number
@@ -2031,12 +2169,6 @@ components:
           minimum: 1
           maximum: 4096
           default: 128
-        rpmMaxTokens:
-          description: RPM 每请求生成上限（只关心请求速率，取小）
-          type: integer
-          minimum: 1
-          maximum: 4096
-          default: 16
         rpmLimitThreshold:
           description: 判定某档触发限速的 429 占比阈值（0-1）
           type: number
@@ -2073,12 +2205,6 @@ components:
           minimum: 1
           maximum: 4096
           default: 128
-        tpmMaxTokensPerReq:
-          description: TPM 每请求 max_tokens 砝码（顶格数数 prompt 保证打满输出；输入+输出都计）
-          type: integer
-          minimum: 1
-          maximum: 8192
-          default: 256
         tpmLimitThreshold:
           description: 判定某档触发限速的 429 占比阈值（0-1）
           type: number
@@ -2193,6 +2319,58 @@ components:
           type: integer
         avg:
           type: number
+    StabilityDeviation:
+      description: 目标 vs 实测 token 的相对偏差分布（%，正 = 实测多于目标）
+      type: object
+      required: [samples, p50, min, max, absP95, exceeded]
+      properties:
+        samples:
+          description: 参与统计的样本数（正常应答且有 usage）
+          type: integer
+        p50:
+          type: number
+        min:
+          type: number
+        max:
+          type: number
+        absP95:
+          description: "|偏差| 的 p95"
+          type: number
+        exceeded:
+          description: "|偏差| p95 超过 ±10%"
+          type: boolean
+    StabilityCalibration:
+      description: 负载画像定标：任务开始先发一条固定字符数的填充请求，读 prompt_tokens 得实测字符/token 比，后续请求按此比例凑长度
+      type: object
+      required: [chars, promptTokens, nominalRatio, measuredRatio, deviationPct]
+      properties:
+        chars:
+          description: 定标填充字符数
+          type: integer
+        promptTokens:
+          description: 定标请求实测 prompt_tokens
+          type: integer
+        nominalRatio:
+          description: 名义字符/token 比
+          type: number
+        measuredRatio:
+          description: 实测字符/token 比
+          type: number
+        deviationPct:
+          description: 实测比相对名义比的偏差（%）
+          type: number
+        sharedTokens:
+          description: 共享前缀目标 token 数（缓存命中率 >0 时有）
+          type: integer
+        cacheWarmCached:
+          description: 写缓存预热的第二条请求实测 cached_tokens（验证共享前缀已写入渠道缓存；上游不报缓存字段时缺省）
+          type: integer
+        uncalibrated:
+          description: 定标没测成（上游不报 usage / 定标请求失败 / 计量异常）：按名义比塑形照跑，输入偏差无从实测或不准
+          type: boolean
+        reason:
+          description: 没测成的原因
+          type: string
     StabilityMetrics:
       description: 一个（probe×档位）的指标集
       type: object
@@ -2267,6 +2445,34 @@ components:
         convergedTpm:
           description: __overall__ TPM 收敛的可持续边界（token/分钟）
           type: number
+        inputDeviation:
+          description: 目标输入 vs 实测 prompt_tokens 的相对偏差分布（仅输入塑形时有）
+          allOf:
+            - $ref: "#/components/schemas/StabilityDeviation"
+        outputDeviation:
+          description: 目标输出 vs 实测 completion_tokens 的相对偏差分布（仅有输出目标时有）
+          allOf:
+            - $ref: "#/components/schemas/StabilityDeviation"
+        cacheHitRate:
+          description: 实测缓存命中率 = Σcached_tokens / Σinput_tokens（正常应答样本；仅目标命中率 >0 时有）
+          type: number
+        cacheExpected:
+          description: 目标缓存命中率 h（仅 >0 时有）
+          type: number
+        cacheMiss:
+          description: 实测命中率偏离目标超过 ±0.10（渠道缓存未按预期命中）
+          type: boolean
+        reasoningSeen:
+          description: 正常应答中出现推理的条数（推理增量 / 正文开头的 think 段 / usage 报了推理 token / 输出上限被思考用完；请求关闭思考时据此判断是否关掉）
+          type: integer
+        preflight:
+          description: __overall__ 预检结论（请求形态的兼容调整、关思考探测）
+          allOf:
+            - $ref: "#/components/schemas/StabilityPreflight"
+        calibration:
+          description: __overall__ 负载画像定标结果（仅输入塑形时有）
+          allOf:
+            - $ref: "#/components/schemas/StabilityCalibration"
         rateLimitHeaders:
           description: 最近一次响应携带的限速头快照（x-ratelimit-*/anthropic-ratelimit-*/retry-after）
           type: object
@@ -2357,7 +2563,16 @@ components:
         outputTokens:
           type: integer
         cachedTokens:
-          description: 输入中命中缓存的 token 数
+          description: 输入中命中缓存的 token 数（上游不报缓存字段时缺省）
+          type: integer
+        targetInputTokens:
+          description: 本条请求的目标输入 token（仅输入塑形时有）
+          type: integer
+        targetOutputTokens:
+          description: 本条请求的目标输出 token（有输出目标时有）
+          type: integer
+        reasoningTokens:
+          description: usage 明细里的推理 token（无 usage 缺省；渠道不报为 0）
           type: integer
         warmup:
           type: boolean
