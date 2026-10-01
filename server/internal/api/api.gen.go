@@ -722,7 +722,7 @@ type StabilityMetrics struct {
 	// AchievedTokenRate TPM 开环档实测 token 吞吐（token/s，输入+输出都计）
 	AchievedTokenRate *float32 `json:"achievedTokenRate,omitempty"`
 
-	// BudgetExhausted 生成上限被推理耗尽仍无正文的条数；不计入 errors/errorRate（砝码不足非渠道故障），>0 即 TTFT 结论不可用
+	// BudgetExhausted 输出上限被思考用完、还没写出正文的条数（渠道正常应答，不计入 errors）；这些请求测不到 TTFT
 	BudgetExhausted *int `json:"budgetExhausted,omitempty"`
 
 	// ByErrorClass 各错误分类计数
@@ -739,8 +739,10 @@ type StabilityMetrics struct {
 
 	// ConvergedTpm __overall__ TPM 收敛的可持续边界（token/分钟）
 	ConvergedTpm *float32 `json:"convergedTpm,omitempty"`
-	ErrorRate    float32  `json:"errorRate"`
-	Errors       int      `json:"errors"`
+
+	// ErrorRate 真错误 / 全部请求（输出上限用尽属正常应答，不算错误）
+	ErrorRate float32 `json:"errorRate"`
+	Errors    int     `json:"errors"`
 
 	// RateLimitHeaders 最近一次响应携带的限速头快照（x-ratelimit-*/anthropic-ratelimit-*/retry-after）
 	RateLimitHeaders *map[string]string `json:"rateLimitHeaders,omitempty"`
@@ -915,7 +917,7 @@ type StabilityTaskParams struct {
 	// ConcurrencyLadder 阶梯并发的并发档序列（闭环）
 	ConcurrencyLadder *[]int `json:"concurrencyLadder,omitempty"`
 
-	// LadderMaxTokens 每请求生成上限（max_tokens 砝码，控制单请求耗时与成本）
+	// LadderMaxTokens 每请求生成上限（max_tokens）；推理模型先思考再写正文，太小会被思考占满、测不到 TTFT
 	LadderMaxTokens *int `json:"ladderMaxTokens,omitempty"`
 
 	// MaxDurationSec 整任务墙钟上限（秒）；到点停派新请求、在途的跑完，已出结果照常出报告并标截断

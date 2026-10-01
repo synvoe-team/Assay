@@ -251,7 +251,7 @@ const zh = {
   'stab.truncatedLowerNote': '尚未出现限速，真实边界 ≥ 该值',
   'stab.truncatedBinaryNote': '已出现限速但二分未完成，精度不足',
   'stab.budgetExhaustedBanner':
-    '部分请求的生成上限被推理耗尽、没有正文（见错误分类「预算耗尽」）：这是测试给的生成上限太小，不是渠道故障，不计入错误率；但本项 TTFT 结论不可用，请调大生成上限后重测。',
+    '有请求在写出正文前就用完了输出上限（max_tokens）：推理模型会先思考再作答，上限太小时思考就把它占满了。这不是渠道报错，也和账户额度无关，只是这些请求测不到首字时间（TTFT）。把「每请求 max_tokens」调大（默认 2048）后重跑即可。',
   'stab.cacheHitsNote': '命中输入缓存的请求（已从延迟分位剔除）',
   'stab.ttfd': 'TTFD',
   'stab.rateLimitHeaders': '限速响应头',
@@ -282,8 +282,8 @@ const zh = {
   'errClass.http_5xx': '5xx 服务端',
   'errClass.stream_anomaly': '流异常/断流',
   'errClass.semantic_empty': '空响应',
-  'errClass.budget_exhausted': '预算耗尽',
-  'errClass.budget_exhausted.hint': '生成上限被推理耗尽仍无正文：测试砝码太小，非渠道故障，不计入错误率',
+  'errClass.budget_exhausted': '输出上限用尽',
+  'errClass.budget_exhausted.hint': '模型把输出上限（max_tokens）都用在思考上，还没写出正文就停了。渠道是正常应答的：不算错误、不影响错误率，也和账户额度无关；只是这些请求测不到首字时间（TTFT）。RPM/TPM 只看速率，出现属预期。',
   'errClass.reasoning_only': '只有推理',
 
   'forbidden.title': '无权访问',
@@ -620,7 +620,7 @@ const en: Record<DictKey, string> = {
   'stab.truncatedLowerNote': 'no rate limit seen yet; true boundary ≥ this value',
   'stab.truncatedBinaryNote': 'rate limit seen but binary search unfinished; low precision',
   'stab.budgetExhaustedBanner':
-    'Some requests exhausted max_tokens on reasoning with no content (see "Budget exhausted"): the test budget is too small, not a channel fault, and is excluded from the error rate; TTFT for this probe is not usable. Raise max_tokens and rerun.',
+    'Some requests used up max_tokens before writing any answer: reasoning models think first, and a small cap is filled by thinking alone. This is not a channel error and has nothing to do with account quota; those requests just have no TTFT. Raise "max_tokens per request" (default 2048) and rerun.',
   'stab.cacheHitsNote': 'Requests hitting input cache (excluded from latency percentiles)',
   'stab.ttfd': 'TTFD',
   'stab.rateLimitHeaders': 'Rate-limit headers',
@@ -651,8 +651,8 @@ const en: Record<DictKey, string> = {
   'errClass.http_5xx': '5xx server',
   'errClass.stream_anomaly': 'Stream anomaly',
   'errClass.semantic_empty': 'Empty response',
-  'errClass.budget_exhausted': 'Budget exhausted',
-  'errClass.budget_exhausted.hint': 'max_tokens used up by reasoning with no content: test budget too small, not a channel fault; excluded from error rate',
+  'errClass.budget_exhausted': 'Output cap reached',
+  'errClass.budget_exhausted.hint': 'The model spent the whole max_tokens on thinking and stopped before writing an answer. The channel responded normally: not an error, not in the error rate, unrelated to quota; these requests just have no TTFT. Expected for RPM/TPM, which only measure rate.',
   'errClass.reasoning_only': 'Reasoning only',
 
   'forbidden.title': 'Access denied',

@@ -30,8 +30,8 @@ var stabilityFootnotes = []string{
 	"请求固定走 HTTP/1.1、多连接（对齐官方 SDK 默认行为），每条样本记录实际协商的协议版本。",
 	"每条 prompt 带任务内唯一前缀，破渠道整条响应缓存；输入命中缓存（cached_tokens>0）的成功样本不计入延迟分位。",
 	"成功 = HTTP 200 + 流走到协议结束帧 + 有正文；200 之后流被掐断、无结束帧或流内报错计为流异常。",
-	"生成上限被推理耗尽仍无正文计为「预算耗尽」：是测试砝码太小而非渠道故障，不计入错误率；出现即说明 TTFT 结论不可用，应调大生成上限。",
-	"分位数在评估期对成功样本确定性计算（线性插值，对齐 numpy type-7 / vLLM bench 口径）。",
+	"推理模型先思考后作答：输出上限（max_tokens）在写出正文前就被思考用完的请求记为「输出上限用尽」——渠道正常应答，不算错误、不影响错误率，首字节/首增量/耗时/吞吐照常统计，只是该条测不到 TTFT。阶梯并发默认上限 2048 足够常见推理模型写出正文；RPM/TPM 只看速率，上限用尽属预期。",
+	"分位数在评估期对正常应答样本确定性计算（线性插值，对齐 numpy type-7 / vLLM bench 口径）。",
 	"预热样本（warmup）不计入任何指标：阶梯并发每档开头的预热请求，以及 RPM/TPM 每档前一半的热身期。",
 	"吞吐（rps / tokens·s⁻¹）按样本时间跨度计（最早排定至最晚完成）；__overall__ 行不含跨档吞吐。",
 	"RPM 实测为开环恒定到达率：dispatched_at 记排定时刻而非起飞时刻（修正协调遗漏）；每档前一半为热身（让渠道消化上一档没清零的计数、令牌桶攒下的突发额度），只用后一半的 429 占比判定是否限速，二分收敛可持续 RPM 边界。",
@@ -118,11 +118,13 @@ func (h *handlers) CreateStabilityTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// progress_total 取最坏预估上界；probe 碰硬闸提前收敛则实发少于此值，任务照常 succeeded
+	// progress_total 取最坏预估上界，但不超过总请求硬闸（闸外一条都不会发）；
+	// 提前收敛则实发少于此值，任务成功时 FinishTask 把进度补满
 	total := 0
 	for _, p := range probes {
 		total += p.Info.EstRequests(params)
 	}
+	total = min(total, params.MaxTotalRequests)
 
 	// 参数快照：证据链要求，历史报告不受渠道后续编辑/删除影响（绝不含 API key）
 	target := probe.Target{
@@ -506,7 +508,8 @@ func (h *handlers) loadStabilityTask(w http.ResponseWriter, r *http.Request, id 
 
 // resolveStabilityParams api 入参 → 领域参数，落默认 + fail-fast 校验；非空 errMsg = 400。
 func resolveStabilityParams(in api.StabilityTaskParams) (stability.StabilityParams, string) {
-	var p stability.StabilityParams
+	// 预热数 0 是合法取值（不预热），ApplyDefaults 不补它；所以「没传」要在这里先落契约默认值
+	p := stability.StabilityParams{WarmupPerStage: stability.DefaultWarmupPerStage}
 	if in.Protocol != nil {
 		p.Protocol = string(*in.Protocol)
 	}

@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Assay API
   description: LLM 渠道检测平台 API。本文件是前后端契约的唯一真相源（契约优先）。
-  version: 0.14.0
+  version: 0.14.1
 servers:
   - url: /api
 paths:
@@ -2002,11 +2002,11 @@ components:
           maximum: 100
           default: 0
         ladderMaxTokens:
-          description: 每请求生成上限（max_tokens 砝码，控制单请求耗时与成本）
+          description: 每请求生成上限（max_tokens）；推理模型先思考再写正文，太小会被思考占满、测不到 TTFT
           type: integer
           minimum: 1
           maximum: 4096
-          default: 64
+          default: 2048
         rpmStartRate:
           description: RPM 实测起始到达率（req/s，开环）
           type: number
@@ -2204,6 +2204,7 @@ components:
         errors:
           type: integer
         errorRate:
+          description: 真错误 / 全部请求（输出上限用尽属正常应答，不算错误）
           type: number
         ttftMs:
           $ref: "#/components/schemas/StabilityPercentiles"
@@ -2216,7 +2217,7 @@ components:
         totalMs:
           $ref: "#/components/schemas/StabilityPercentiles"
         budgetExhausted:
-          description: 生成上限被推理耗尽仍无正文的条数；不计入 errors/errorRate（砝码不足非渠道故障），>0 即 TTFT 结论不可用
+          description: 输出上限被思考用完、还没写出正文的条数（渠道正常应答，不计入 errors）；这些请求测不到 TTFT
           type: integer
         cacheHits:
           description: 输入命中缓存的成功条数；不计入延迟分位

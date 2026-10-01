@@ -18,7 +18,7 @@ type StabilityParams struct {
 	ConcurrencyLadder []int `json:"concurrencyLadder"` // 各并发档，默认 [1,2,4,8,16]
 	RequestsPerStage  int   `json:"requestsPerStage"`  // 每档计入统计的请求数，默认 20
 	WarmupPerStage    int   `json:"warmupPerStage"`    // 每档预热请求数（评估剔除），默认 2
-	LadderMaxTokens   int   `json:"ladderMaxTokens"`   // 每请求生成上限，默认 64
+	LadderMaxTokens   int   `json:"ladderMaxTokens"`   // 每请求生成上限，默认 2048（推理模型先思考再写正文，太小测不到 TTFT）
 
 	// —— RPM 实测（开环，恒定到达率二分收敛速率边界）——
 	RpmStartRate      float64 `json:"rpmStartRate"`      // 起始到达率 req/s，默认 2
@@ -49,7 +49,7 @@ type StabilityParams struct {
 const (
 	DefaultRequestsPerStage = 20
 	DefaultWarmupPerStage   = 2
-	DefaultLadderMaxTokens  = 64
+	DefaultLadderMaxTokens  = 2048
 	DefaultMaxTotalRequests = 10000
 	DefaultMaxTotalTokens   = 2_000_000
 	DefaultMaxDurationSec   = 3600

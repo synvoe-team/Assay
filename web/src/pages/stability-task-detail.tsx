@@ -60,12 +60,13 @@ const CHART_CONFIG: ChartConfig = {
   ttfdP50: { label: 'TTFD p50', color: '#7c3aed' },
 }
 
-// hasReasoningGap 推理模型的首增量（思考开始）明显早于首正文：只有这时才单列 TTFD，
-// 非推理模型两者相等，多画一条只是噪音
+// hasReasoningGap 首增量带来 TTFT 之外的信息时才单列 TTFD：推理模型先吐思考（首增量早于首正文），
+// 或整档没测到首正文（输出上限被思考用完，首增量是唯一的首响应延迟）；非推理模型两者相等，多画一条只是噪音
 function hasReasoningGap(stages: StabilityStageMetric[]): boolean {
-  return stages.some(
-    (s) => s.metrics.ttfdMs != null && s.metrics.ttftMs != null && s.metrics.ttfdMs.p50 < s.metrics.ttftMs.p50,
-  )
+  return stages.some((s) => {
+    const { ttfdMs, ttftMs } = s.metrics
+    return ttfdMs != null && (ttftMs == null || ttfdMs.p50 < ttftMs.p50)
+  })
 }
 
 // boundaryState RPM/TPM 收敛值的可信度：触顶护栏或「被截断且从没见过限速档」时只是下界（显示 ≥），
@@ -372,7 +373,7 @@ function ProbeSection({
   return (
     <div className="grid gap-4">
       <p className="text-sm font-medium">{name}</p>
-      {budgetExhausted > 0 && (
+      {budgetExhausted > 0 && !isTpm && !isRpm && (
         <p className="flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
           <TriangleAlert className="mt-0.5 size-4 shrink-0" />
           {t('stab.budgetExhaustedBanner')}
@@ -608,35 +609,39 @@ function RpmView({
   )
 }
 
-// ERR_CLASS_TONE 错误分类徽章配色：预算耗尽是测试砝码问题（琥珀提醒），只有推理是渠道/模型问题（红）
+// ERR_CLASS_TONE 错误分类徽章配色：只有推理是渠道/模型问题（红）
 const ERR_CLASS_TONE: Record<string, string> = {
-  budget_exhausted: 'border-amber-500/40 text-amber-700 dark:text-amber-300',
   reasoning_only: 'border-destructive/40 text-destructive',
 }
 
-// ErrorClassBadges 错误分类徽章：两类视图共用（源自 __overall__ 的 byErrorClass）
+// ErrorClassBadges 错误分类徽章：两类视图共用（源自 __overall__ 的 byErrorClass）。
+// 输出上限用尽是渠道正常应答（不算错误），单独一枚琥珀徽章放在「错误分类」之外，免得被读成报错
 function ErrorClassBadges({ overall }: { overall?: StabilityStageMetric }) {
   const { t } = useI18n()
-  const errorClasses = Object.entries(overall?.metrics.byErrorClass ?? {}).filter(([, n]) => n > 0)
-  if (errorClasses.length === 0) return null
+  const byClass = overall?.metrics.byErrorClass ?? {}
+  const capped = byClass.budget_exhausted ?? 0
+  const errorClasses = Object.entries(byClass).filter(([cls, n]) => n > 0 && cls !== 'budget_exhausted')
+  if (errorClasses.length === 0 && capped === 0) return null
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <span className="text-xs text-muted-foreground">{t('stab.byErrorClass')}：</span>
-      {errorClasses.map(([cls, n]) => {
-        const badge = (
-          <Badge key={cls} variant="outline" className={cn('font-normal', ERR_CLASS_TONE[cls])}>
-            {t(`errClass.${cls}` as DictKey)} · {n}
-          </Badge>
-        )
-        return cls === 'budget_exhausted' ? (
-          <Tooltip key={cls}>
-            <TooltipTrigger asChild>{badge}</TooltipTrigger>
-            <TooltipContent>{t('errClass.budget_exhausted.hint')}</TooltipContent>
-          </Tooltip>
-        ) : (
-          badge
-        )
-      })}
+      {capped > 0 && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="outline" className="border-amber-500/40 font-normal text-amber-700 dark:text-amber-300">
+              {t('errClass.budget_exhausted')} · {capped}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-80">{t('errClass.budget_exhausted.hint')}</TooltipContent>
+        </Tooltip>
+      )}
+      {errorClasses.length > 0 && (
+        <span className="text-xs text-muted-foreground">{t('stab.byErrorClass')}：</span>
+      )}
+      {errorClasses.map(([cls, n]) => (
+        <Badge key={cls} variant="outline" className={cn('font-normal', ERR_CLASS_TONE[cls])}>
+          {t(`errClass.${cls}` as DictKey)} · {n}
+        </Badge>
+      ))}
     </div>
   )
 }

@@ -212,8 +212,10 @@ update tasks set status = 'running', started_at = coalesce(started_at, now())
 where id = $1 and status in ('queued', 'running');
 
 -- name: FinishTask :execrows
--- 终态不可逆：running 之外（已 canceled/failed）不允许再改
-update tasks set status = $2, error = $3, finished_at = now()
+-- 终态不可逆：running 之外（已 canceled/failed）不允许再改。
+-- 成功即进度满：稳定性分母是最坏预估，提前收敛时实发少于分母，不补满进度条会停在半截
+update tasks set status = $2, error = $3, finished_at = now(),
+  progress_done = case when $2 = 'succeeded' then progress_total else progress_done end
 where id = $1 and status = 'running';
 
 -- name: UpdateTaskProgress :exec

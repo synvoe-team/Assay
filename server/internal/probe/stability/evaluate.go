@@ -59,32 +59,32 @@ func measured(samples []Sample) []Sample {
 }
 
 // aggregate 把一组（已剔除预热的）样本聚合成 Metrics（延迟分位数 + 错误分类 + 吞吐）。
-// 延迟分位只统计成功且未命中缓存的样本（失败无延迟；缓存命中的延迟不代表渠道真实 prefill）；
-// 预算耗尽单独计数、不进错误率分母（是我们给的生成上限太小，不是渠道故障）；吞吐按样本时间跨度确定性计算。
+// 延迟分位只统计正常应答（served）且未命中缓存的样本（失败无延迟；缓存命中的延迟不代表渠道真实 prefill）；
+// 错误率 = 真错误 / 全部请求；输出上限用尽另计条数（渠道正常应答，只是测不到 TTFT）；吞吐按样本时间跨度确定性计算。
 func aggregate(samples []Sample) Metrics {
 	m := Metrics{Requests: len(samples), ByErrorClass: map[string]int{}}
 	var ttfb, ttfd, ttft, total []int
 	for _, s := range samples {
-		switch {
-		case s.ErrorClass == ErrBudgetExhausted:
-			m.BudgetExhausted++
+		if s.ErrorClass != "" {
 			m.ByErrorClass[s.ErrorClass]++
-		case !s.Ok:
+		}
+		if s.ErrorClass == ErrBudgetExhausted {
+			m.BudgetExhausted++
+		}
+		switch {
+		case !served(s):
 			m.Errors++
-			if s.ErrorClass != "" {
-				m.ByErrorClass[s.ErrorClass]++
-			}
 		case s.CachedTokens > 0:
 			m.CacheHits++
 		default:
 			ttfb = appendMeasured(ttfb, s.TTFBms)
 			ttfd = appendMeasured(ttfd, s.TTFDms)
-			ttft = appendMeasured(ttft, s.TTFTms)
+			ttft = appendMeasured(ttft, s.TTFTms) // 输出上限用尽的样本无正文，TTFT 本就缺测
 			total = appendMeasured(total, s.TotalMs)
 		}
 	}
-	if valid := m.Requests - m.BudgetExhausted; valid > 0 {
-		m.ErrorRate = math.Round(float64(m.Errors)/float64(valid)*10000) / 10000
+	if m.Requests > 0 {
+		m.ErrorRate = math.Round(float64(m.Errors)/float64(m.Requests)*10000) / 10000
 	}
 	if len(m.ByErrorClass) == 0 {
 		m.ByErrorClass = nil // 无错误时不落空对象
@@ -105,14 +105,14 @@ func appendMeasured(v []int, ms int) []int {
 	return append(v, ms)
 }
 
-// throughput 按成功样本的时间跨度算吞吐：请求/秒 与 生成 token/秒。
+// throughput 按正常应答样本的时间跨度算吞吐：请求/秒 与 生成 token/秒。
 // 跨度 = 最早排定到最晚完成（dispatched_at + total_ms）。
 func throughput(samples []Sample) (rps float64, tokPerSec float64) {
 	var minD, maxC time.Time
 	ok := 0
 	var outTokens int64
 	for _, s := range samples {
-		if !s.Ok || s.TotalMs < 0 {
+		if !served(s) || s.TotalMs < 0 {
 			continue
 		}
 		d := s.DispatchedAt
