@@ -19,6 +19,7 @@ import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
 import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
+import { Textarea } from '@/components/ui/textarea'
 import {
   Select,
   SelectContent,
@@ -40,8 +41,10 @@ import {
   stabilityApi,
   stabilityProbesApi,
   type Protocol,
+  type StabilityCompat,
   type StabilityProbeInfo,
   type StabilityTask,
+  type StabilityThinking,
   type StabilityWorkload,
   type TaskStatus,
 } from '@/lib/api'
@@ -111,6 +114,54 @@ const MIN_UNIQUE_TOKENS = 64 // h>0 时每请求唯一段下限
 const CALIB_TOKENS = 3000 // 定标请求 ≈ 12000 字符
 const CACHE_WARMUP_REQUESTS = 2
 
+// —— 思考控制与兼容选项（口径对齐后端 protocol/shape.go、stability/preflight.go）——
+// 各协议适用的思考控制（下拉顺序）；anthropic 只有 thinking.type=disabled 一种写法
+const THINKING_OPTIONS: Record<string, StabilityThinking[]> = {
+  openai_chat: [
+    'default',
+    'auto',
+    'thinking_disabled',
+    'reasoning_effort_none',
+    'reasoning_effort_minimal',
+    'enable_thinking_false',
+    'chat_template_kwargs',
+    'reasoning_enabled_false',
+  ],
+  openai_responses: [
+    'default',
+    'auto',
+    'reasoning_effort_none',
+    'reasoning_effort_minimal',
+    'thinking_disabled',
+    'enable_thinking_false',
+    'chat_template_kwargs',
+    'reasoning_enabled_false',
+  ],
+  anthropic_messages: ['default', 'auto', 'thinking_disabled'],
+}
+// 自动探测时各协议逐个试的写法数（准备期请求上界）
+const THINKING_CANDIDATES: Record<string, number> = { openai_chat: 6, openai_responses: 5, anthropic_messages: 1 }
+type MaxTokensField = NonNullable<StabilityCompat['maxTokensField']>
+type StreamUsage = NonNullable<StabilityCompat['streamUsage']>
+const MAX_TOKENS_FIELDS: MaxTokensField[] = ['auto', 'max_tokens', 'max_completion_tokens']
+const STREAM_USAGES: StreamUsage[] = ['auto', 'on', 'off']
+// 自定义请求体字段不能覆盖的键（模型、prompt、流式与生成上限归负载画像管）；请求头不能覆盖传输层头
+const RESERVED_BODY_KEYS = ['model', 'messages', 'input', 'stream', 'max_tokens', 'max_completion_tokens', 'max_output_tokens']
+const RESERVED_HEADERS = ['host', 'content-length', 'content-type', 'transfer-encoding', 'connection']
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
+
+// parseJsonObject 解析用户填的 JSON 对象；空串 = 不设
+function parseJsonObject(text: string): { value?: Record<string, unknown>; bad?: boolean } {
+  if (text.trim() === '') return {}
+  try {
+    const v: unknown = JSON.parse(text)
+    if (v && typeof v === 'object' && !Array.isArray(v)) return { value: v as Record<string, unknown> }
+  } catch {
+    // 落到下面的 bad
+  }
+  return { bad: true }
+}
+
 export default function StabilityPage() {
   const { t } = useI18n()
   const navigate = useNavigate()
@@ -132,7 +183,14 @@ export default function StabilityPage() {
   const [inputMax, setInputMax] = useState('8000')
   const [cacheHitRate, setCacheHitRate] = useState(0)
   const [outputTarget, setOutputTarget] = useState('') // 空 = 各检测项默认
-  const [disableThinking, setDisableThinking] = useState(false)
+  const [thinking, setThinking] = useState<StabilityThinking>('default')
+  // 兼容选项：默认全自动（预检按上游实际反应调整），需要时手动指定
+  const [showCompat, setShowCompat] = useState(false)
+  const [maxTokensField, setMaxTokensField] = useState<MaxTokensField>('auto')
+  const [streamUsage, setStreamUsage] = useState<StreamUsage>('auto')
+  const [chatCacheControl, setChatCacheControl] = useState(false)
+  const [extraBodyText, setExtraBodyText] = useState('')
+  const [extraHeadersText, setExtraHeadersText] = useState('')
   // RPM 实测参数（开环恒定到达率爬坡 + 二分收敛）
   const [rpmStartRate, setRpmStartRate] = useState('2')
   const [rpmMaxRate, setRpmMaxRate] = useState('20')
@@ -263,8 +321,41 @@ export default function StabilityPage() {
     if (shaped && timeoutMs < timeoutFloor) return `${t('stab.wl.errTimeout')} ${timeoutFloor} ms`
     return null
   })()
-  // 准备期请求：塑形时 1 条定标，h>0 再加写缓存
-  const prepRequests = shaped ? 1 + (h > 0 ? CACHE_WARMUP_REQUESTS : 0) : 0
+  // 思考控制按协议过滤：换协议后不适用的选项回落「不干预」
+  const thinkingOptions = THINKING_OPTIONS[protocol] ?? ['default', 'auto']
+  const thinkingEff: StabilityThinking = thinkingOptions.includes(thinking) ? thinking : 'default'
+  const isChat = protocol === 'openai_chat'
+  const extraBody = parseJsonObject(extraBodyText)
+  const extraHeaders = parseJsonObject(extraHeadersText)
+  // 复刻后端 Compat.validate：创建前就说清哪里不行
+  const compatIssue = ((): string | null => {
+    if (extraBody.bad) return t('stab.compat.errBodyJson')
+    const reserved = Object.keys(extraBody.value ?? {}).find((k) => RESERVED_BODY_KEYS.includes(k))
+    if (reserved) return `${t('stab.compat.errBodyReserved')} ${reserved}`
+    if (extraHeaders.bad) return t('stab.compat.errHeadersJson')
+    for (const [k, v] of Object.entries(extraHeaders.value ?? {})) {
+      if (!HEADER_NAME.test(k) || RESERVED_HEADERS.includes(k.toLowerCase())) return `${t('stab.compat.errHeaderName')} ${k}`
+      if (typeof v !== 'string' || /[\r\n\0]/.test(v)) return `${t('stab.compat.errHeaderValue')} ${k}`
+    }
+    return null
+  })()
+  // 生成上限字段 / 流式 usage / 显式断点只对 openai_chat 有意义，其它协议发自动档（后端不生效）
+  const compat: StabilityCompat = {
+    maxTokensField: isChat ? maxTokensField : 'auto',
+    streamUsage: isChat ? streamUsage : 'auto',
+    chatCacheControl: isChat && chatCacheControl,
+    ...(extraBody.value ? { extraBody: extraBody.value } : {}),
+    ...(extraHeaders.value ? { extraHeaders: extraHeaders.value as Record<string, string> } : {}),
+  }
+  const compatTouched =
+    (isChat && (maxTokensField !== 'auto' || streamUsage !== 'auto' || chatCacheControl)) ||
+    extraBody.value != null ||
+    extraHeaders.value != null
+  // 准备期请求：1 条预检 + 自动关思考的候选数上界 + 塑形时 1 条定标 + h>0 时写缓存
+  const prepRequests =
+    1 +
+    (thinkingEff === 'auto' ? (THINKING_CANDIDATES[protocol] ?? 0) : 0) +
+    (shaped ? 1 + (h > 0 ? CACHE_WARMUP_REQUESTS : 0) : 0)
   // TPM 每请求 token 权重 = 输入期望 + 输出目标（对齐后端 tpmWeightPerReq）
   const tpmWeight = (shaped ? inputMean : SMALL_PROMPT_TOKENS) + outFor('tpm_probe')
 
@@ -308,6 +399,7 @@ export default function StabilityPage() {
     ladderNums.length > 0 &&
     rps >= 1 &&
     workloadIssue == null &&
+    compatIssue == null &&
     (!rpmChecked || (rpmStart >= 0.1 && rpmMax >= rpmStart && rpmSec >= 2)) &&
     (!tpmChecked || (tpmStart >= 1 && tpmMax >= tpmStart && tpmSec >= 2))
 
@@ -320,7 +412,7 @@ export default function StabilityPage() {
           : { mode: inputMode, min: inLo, max: inHi },
     cacheHitRate: h,
     ...(outTarget > 0 ? { output: outTarget } : {}),
-    disableThinking,
+    thinking: thinkingEff,
   }
 
   const submit = () => {
@@ -334,6 +426,7 @@ export default function StabilityPage() {
         requestsPerStage: rps,
         warmupPerStage: warmup,
         workload,
+        compat,
         rpmStartRate: rpmStart,
         rpmMaxRate: rpmMax,
         rpmStageSec: rpmSec,
@@ -581,11 +674,27 @@ export default function StabilityPage() {
                   onChange={(e) => setOutputTarget(e.target.value)}
                 />
               </div>
-              <div className="flex h-9 items-center gap-2">
-                <Switch id="s-wl-think" checked={disableThinking} onCheckedChange={setDisableThinking} />
-                <Label htmlFor="s-wl-think">{t('stab.wl.disableThinking')}</Label>
+              <div className="grid gap-2">
+                <Label>{t('stab.wl.thinking')}</Label>
+                <Select value={thinkingEff} onValueChange={(v) => setThinking(v as StabilityThinking)}>
+                  <SelectTrigger className="w-72">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {thinkingOptions.map((m) => (
+                      <SelectItem key={m} value={m}>
+                        {t(`stab.wl.think.${m}` as DictKey)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
+            {thinkingEff !== 'default' && (
+              <p className="text-xs text-muted-foreground">
+                {t(thinkingEff === 'auto' ? 'stab.wl.thinkHintAuto' : 'stab.wl.thinkHintFixed')}
+              </p>
+            )}
             {workloadIssue ? (
               <p className="text-xs text-destructive">{workloadIssue}</p>
             ) : (
@@ -597,6 +706,85 @@ export default function StabilityPage() {
                   </span>
                 )}
               </p>
+            )}
+            <button
+              type="button"
+              className="flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+              onClick={() => setShowCompat((v) => !v)}
+            >
+              <ChevronDown className={`size-4 transition-transform ${showCompat ? '' : '-rotate-90'}`} />
+              {t('stab.compat.title')}
+              {compatTouched && <Badge variant="secondary">{t('stab.compat.custom')}</Badge>}
+            </button>
+            {showCompat && (
+              <div className="grid gap-3 border-l-2 pl-3">
+                <p className="text-xs text-muted-foreground">{t('stab.compat.desc')}</p>
+                {isChat && (
+                  <div className="flex flex-wrap items-end gap-3">
+                    <div className="grid gap-2">
+                      <Label>{t('stab.compat.maxTokensField')}</Label>
+                      <Select value={maxTokensField} onValueChange={(v) => setMaxTokensField(v as MaxTokensField)}>
+                        <SelectTrigger className="w-52">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {MAX_TOKENS_FIELDS.map((f) => (
+                            <SelectItem key={f} value={f}>
+                              {f === 'auto' ? t('stab.compat.auto') : f}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>{t('stab.compat.streamUsage')}</Label>
+                      <Select value={streamUsage} onValueChange={(v) => setStreamUsage(v as StreamUsage)}>
+                        <SelectTrigger className="w-44">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {STREAM_USAGES.map((u) => (
+                            <SelectItem key={u} value={u}>
+                              {t(`stab.compat.usage.${u}` as DictKey)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="flex h-9 items-center gap-2">
+                      <Switch id="s-compat-cc" checked={chatCacheControl} onCheckedChange={setChatCacheControl} />
+                      <Label htmlFor="s-compat-cc">{t('stab.compat.chatCacheControl')}</Label>
+                    </div>
+                  </div>
+                )}
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="grid gap-2">
+                    <Label htmlFor="s-compat-body">{t('stab.compat.extraBody')}</Label>
+                    <Textarea
+                      id="s-compat-body"
+                      className="font-mono text-xs md:text-xs"
+                      placeholder='{"ignore_eos": true, "temperature": 0}'
+                      aria-invalid={extraBody.bad || undefined}
+                      value={extraBodyText}
+                      onChange={(e) => setExtraBodyText(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">{t('stab.compat.extraBodyHint')}</p>
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="s-compat-headers">{t('stab.compat.extraHeaders')}</Label>
+                    <Textarea
+                      id="s-compat-headers"
+                      className="font-mono text-xs md:text-xs"
+                      placeholder='{"anthropic-beta": "…"}'
+                      aria-invalid={extraHeaders.bad || undefined}
+                      value={extraHeadersText}
+                      onChange={(e) => setExtraHeadersText(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">{t('stab.compat.extraHeadersHint')}</p>
+                  </div>
+                </div>
+                {compatIssue && <p className="text-xs text-destructive">{compatIssue}</p>}
+              </div>
             )}
           </div>
 

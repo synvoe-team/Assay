@@ -43,8 +43,10 @@ import {
   stabilityApi,
   stabilityProbesApi,
   type StabilityCalibration,
+  type StabilityCompat,
   type StabilityDeviation,
   type StabilityMetrics,
+  type StabilityPreflight,
   type StabilityReport,
   type StabilityStageMetric,
   type StabilityTask,
@@ -188,15 +190,17 @@ function WorkloadCells({ cols, m }: { cols: WorkloadCols; m: StabilityMetrics })
   )
 }
 
-// CalibrationNote 定标结果：名义比 / 实测比 / 偏差，h>0 时附共享前缀与写缓存命中
+// CalibrationNote 定标结果：名义比 / 实测比 / 偏差，h>0 时附共享前缀与写缓存命中；没测成时写明原因与降级口径
 function CalibrationNote({ c }: { c: StabilityCalibration }) {
   const { t } = useI18n()
-  const items = [
-    `${t('stab.wl.nominalRatio')} ${c.nominalRatio.toFixed(2)} ${t('stab.wl.charsPerToken')}`,
-    `${t('stab.wl.measuredRatio')} ${c.measuredRatio.toFixed(2)} ${t('stab.wl.charsPerToken')}`,
-    `${t('stab.wl.deviation')} ${signedPct(c.deviationPct)}`,
-    `${t('stab.wl.calibPrompt')} ${c.chars} → ${c.promptTokens} token`,
-  ]
+  const items = c.uncalibrated
+    ? [`${t('stab.wl.uncalibrated')}${c.reason ? `（${c.reason}）` : ''}`, `${t('stab.wl.nominalRatio')} ${c.nominalRatio.toFixed(2)} ${t('stab.wl.charsPerToken')}`]
+    : [
+        `${t('stab.wl.nominalRatio')} ${c.nominalRatio.toFixed(2)} ${t('stab.wl.charsPerToken')}`,
+        `${t('stab.wl.measuredRatio')} ${c.measuredRatio.toFixed(2)} ${t('stab.wl.charsPerToken')}`,
+        `${t('stab.wl.deviation')} ${signedPct(c.deviationPct)}`,
+        `${t('stab.wl.calibPrompt')} ${c.chars} → ${c.promptTokens} token`,
+      ]
   if (c.sharedTokens) items.push(`${t('stab.wl.sharedPrefix')} ${c.sharedTokens} token`)
   if (c.cacheWarmCached != null) items.push(`${t('stab.wl.cacheWarm')} ${c.cacheWarmCached} token`)
   return (
@@ -205,6 +209,60 @@ function CalibrationNote({ c }: { c: StabilityCalibration }) {
       <p className="text-xs text-muted-foreground">{items.join(' · ')}</p>
     </div>
   )
+}
+
+// 关思考试探结果的配色：关掉了绿、照样思考琥珀、被拒/失败灰
+const TRIAL_TONE: Record<string, string> = {
+  disabled: 'text-emerald-700 dark:text-emerald-400',
+  still_reasoning: 'text-amber-700 dark:text-amber-300',
+  rejected: 'text-muted-foreground line-through',
+  failed: 'text-muted-foreground',
+}
+
+// PreflightNote 预检结论：上游实际接受的请求形态、做过的兼容调整、关思考探测——让「跑通靠的是什么」可审计
+function PreflightNote({ pf }: { pf: StabilityPreflight }) {
+  const { t } = useI18n()
+  const facts = [
+    pf.passed ? `${t('stab.pf.passed')}（${pf.requests} ${t('stab.pf.requests')}）` : `${t('stab.pf.notPassed')}：${pf.detail ?? '—'}`,
+  ]
+  if (pf.passed && !pf.usageReported) facts.push(t('stab.pf.noUsage'))
+  if (pf.nonStream) facts.push(t('stab.pf.nonStream'))
+  if (pf.reasoning) facts.push(t('stab.pf.reasoning'))
+  if (pf.thinkingField) facts.push(`${t('stab.pf.thinkingAdopted')} ${pf.thinkingField}`)
+  return (
+    <div className="grid gap-1">
+      <p className="text-sm font-medium">{t('stab.pf.title')}</p>
+      <p className="text-xs text-muted-foreground">{facts.join(' · ')}</p>
+      {pf.adjustments?.map((a, i) => (
+        <p key={i} className="text-xs text-amber-700 dark:text-amber-300">
+          {t('stab.pf.adjusted')}：{a}
+        </p>
+      ))}
+      {pf.trials && pf.trials.length > 0 && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+          <span className="text-muted-foreground">{t('stab.pf.trials')}</span>
+          {pf.trials.map((tr) => (
+            <span key={tr.variant} className={TRIAL_TONE[tr.outcome]} title={tr.detail}>
+              <code>{tr.field}</code> {t(`stab.pf.outcome.${tr.outcome}` as DictKey)}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// compatSummary 参数快照里的兼容选项一行；全自动且无自定义字段时为空（不展示）
+function compatSummary(c: StabilityCompat | undefined, t: (k: DictKey) => string): string {
+  if (!c) return ''
+  const parts: string[] = []
+  if (c.maxTokensField && c.maxTokensField !== 'auto') parts.push(c.maxTokensField)
+  if (c.streamUsage && c.streamUsage !== 'auto') parts.push(`${t('stab.compat.streamUsage')} ${t(`stab.compat.usage.${c.streamUsage}` as DictKey)}`)
+  if (c.chatCacheControl) parts.push(t('stab.compat.chatCacheControl'))
+  if (c.extraBody && Object.keys(c.extraBody).length > 0) parts.push(`${t('stab.compat.extraBody')} ${JSON.stringify(c.extraBody)}`)
+  if (c.extraHeaders && Object.keys(c.extraHeaders).length > 0)
+    parts.push(`${t('stab.compat.extraHeaders')} ${Object.keys(c.extraHeaders).join(', ')}`)
+  return parts.join(' · ')
 }
 
 // workloadSummary 参数快照里的负载画像一行
@@ -219,7 +277,7 @@ function workloadSummary(w: StabilityWorkload | undefined, t: (k: DictKey) => st
   ]
   if (w?.cacheHitRate) parts.push(`${t('stab.wl.cacheHitRate')} ${pct(w.cacheHitRate)}`)
   parts.push(`${t('stab.wl.output')} ${w?.output ?? t('stab.wl.outputDefault')}`)
-  if (w?.disableThinking) parts.push(t('stab.wl.disableThinking'))
+  if (w?.thinking && w.thinking !== 'default') parts.push(`${t('stab.wl.thinking')} ${t(`stab.wl.think.${w.thinking}` as DictKey)}`)
   return parts.join(' · ')
 }
 
@@ -401,7 +459,8 @@ function MetricsCard({
   // 按出现顺序归拢 probe，保留注册序即展示序
   const probeIds: string[] = []
   for (const s of report.stages) if (!probeIds.includes(s.probe)) probeIds.push(s.probe)
-  // 定标结果写在各检测项的 __overall__ 上，取值相同，取第一份展示
+  // 预检与定标结果写在各检测项的 __overall__ 上，取值相同，取第一份展示
+  const preflight = report.stages.find((s) => s.metrics.preflight != null)?.metrics.preflight
   const calibration = report.stages.find((s) => s.metrics.calibration != null)?.metrics.calibration
 
   return (
@@ -424,6 +483,7 @@ function MetricsCard({
         {report.incomplete && (
           <p className="text-sm text-amber-600 dark:text-amber-400">{t('stab.incompleteNote')}</p>
         )}
+        {preflight && <PreflightNote pf={preflight} />}
         {calibration && <CalibrationNote c={calibration} />}
         {report.stages.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t('stab.noMetrics')}</p>
@@ -508,6 +568,9 @@ function ProbeSection({
         <p className="text-xs text-muted-foreground">{t('stab.wl.devHint')}</p>
       )}
       <ErrorClassBadges overall={overall} />
+      {om?.cacheExpected != null && om.cacheHitRate == null && (
+        <p className="text-xs text-muted-foreground">{t('stab.wl.cacheUnknown')}</p>
+      )}
       {(om?.cacheHits ?? 0) > 0 && om?.cacheExpected == null && (
         <p className="text-xs text-muted-foreground">
           {t('stab.cacheHitsNote')}：{om!.cacheHits}
@@ -1018,6 +1081,7 @@ function SnapshotCard({
       `${t('stab.ladder')} [${p.concurrencyLadder.join(', ')}] · ${t('stab.requestsPerStage')} ${p.requestsPerStage} · ${t('stab.warmupPerStage')} ${p.warmupPerStage}`,
     ],
     [t('stab.wl.title'), workloadSummary(p.workload, t)],
+    ...(compatSummary(p.compat, t) ? [[t('stab.compat.title'), compatSummary(p.compat, t)] as [string, string]] : []),
     [
       t('stab.maxTotalRequests'),
       `${p.maxTotalRequests} · ${t('stab.maxTotalTokens')} ${p.maxTotalTokens} · ${t('stab.maxDurationSec')} ${p.maxDurationSec} · ${t('stab.requestTimeout')} ${p.requestTimeoutMs}`,
