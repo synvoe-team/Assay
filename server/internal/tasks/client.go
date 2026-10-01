@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -45,7 +46,7 @@ func New(pool *pgxpool.Pool, log *slog.Logger) (*Client, error) {
 		pool:   pool,
 		q:      q,
 		log:    log,
-		client: workerHTTPClient(),
+		client: stabilityHTTPClient(),
 	})
 
 	rc, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
@@ -154,11 +155,27 @@ func (c *Client) SweepOrphans(ctx context.Context) error {
 	return nil
 }
 
-// workerHTTPClient 检测请求专用连接池：单 host 并发上限 16（params.concurrency 上限），
-// 抬高空闲连接数避免高并发下反复握手。超时不设全局值，由每请求 ctx 控制。
+// workerHTTPClient 质量检测请求专用连接池：质量任务并发上限 16，空闲连接留到 32 足以复用、
+// 避免高并发下反复握手。超时不设全局值，由每请求 ctx 控制。
 func workerHTTPClient() *http.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.MaxIdleConns = 64
 	tr.MaxIdleConnsPerHost = 32
+	return &http.Client{Transport: tr}
+}
+
+// stabilityHTTPClient 稳定性压测专用连接池，固定 HTTP/1.1、一请求一连接：
+//   - 对齐官方 Python/Node SDK 的默认行为与手工压测基线，测量口径一致；
+//   - h2 会把全部并发复用进一条 TCP 连接——对端按连接分流时压力全落在一台后端，
+//     大请求体上传还会被 h2 流控窗口拖慢，测出来的是我们的传输方式而不是渠道。
+//
+// TLSNextProto 置为非 nil 空表即关闭 h2 协商（ForceAttemptHTTP2 也一并关掉）。
+// 空闲连接上限对齐在途上限的校验上限（4096），高在途时不因连接被回收而反复握手。
+func stabilityHTTPClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ForceAttemptHTTP2 = false
+	tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	tr.MaxIdleConns = 4096
+	tr.MaxIdleConnsPerHost = 4096
 	return &http.Client{Transport: tr}
 }
