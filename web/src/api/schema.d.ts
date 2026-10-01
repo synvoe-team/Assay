@@ -1119,8 +1119,8 @@ export interface components {
              */
             warmupPerStage: number;
             /**
-             * @description 每请求生成上限（max_tokens 砝码，控制单请求耗时与成本）
-             * @default 64
+             * @description 每请求生成上限（max_tokens）；推理模型先思考再写正文，太小会被思考占满、测不到 TTFT
+             * @default 2048
              */
             ladderMaxTokens: number;
             /**
@@ -1260,13 +1260,14 @@ export interface components {
             /** @description 计入统计的请求数（已剔除预热） */
             requests: number;
             errors: number;
+            /** @description 真错误 / 全部请求（输出上限用尽属正常应答，不算错误） */
             errorRate: number;
             ttftMs?: components["schemas"]["StabilityPercentiles"];
             /** @description 首个非空增量（推理或正文）耗时分位；推理模型「开始干活」的时刻，非推理模型≈TTFT */
             ttfdMs?: components["schemas"]["StabilityPercentiles"];
             ttfbMs?: components["schemas"]["StabilityPercentiles"];
             totalMs?: components["schemas"]["StabilityPercentiles"];
-            /** @description 生成上限被推理耗尽仍无正文的条数；不计入 errors/errorRate（砝码不足非渠道故障），>0 即 TTFT 结论不可用 */
+            /** @description 输出上限被思考用完、还没写出正文的条数（渠道正常应答，不计入 errors）；这些请求测不到 TTFT */
             budgetExhausted?: number;
             /** @description 输入命中缓存的成功条数；不计入延迟分位 */
             cacheHits?: number;

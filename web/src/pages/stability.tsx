@@ -112,7 +112,7 @@ export default function StabilityPage() {
   const [ladderText, setLadderText] = useState('1,2,4,8,16')
   const [requestsPerStage, setRequestsPerStage] = useState('20')
   const [warmupPerStage, setWarmupPerStage] = useState('2')
-  const [ladderMaxTokens, setLadderMaxTokens] = useState('64')
+  const [ladderMaxTokens, setLadderMaxTokens] = useState('2048')
   // RPM 实测参数（开环恒定到达率爬坡 + 二分收敛）
   const [rpmStartRate, setRpmStartRate] = useState('2')
   const [rpmMaxRate, setRpmMaxRate] = useState('20')

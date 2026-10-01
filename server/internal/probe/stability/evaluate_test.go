@@ -90,8 +90,9 @@ func TestAggregateNoErrors(t *testing.T) {
 	}
 }
 
-// TestAggregateBudgetAndCache 预算耗尽不计入错误率（砝码不足非渠道故障）、单独计数；
-// 缓存命中的成功样本不进延迟分位、单独计数；TTFD 与 TTFT 各自分位
+// TestAggregateBudgetAndCache 输出上限用尽 = 渠道正常应答：不算错误、进错误率分母，
+// 首字节/首增量/总耗时照常进分位，只是没有正文、测不到 TTFT；单独计数供前端提示。
+// 缓存命中的成功样本不进延迟分位、单独计数
 func TestAggregateBudgetAndCache(t *testing.T) {
 	base := time.Unix(1000, 0)
 	samples := []Sample{
@@ -99,33 +100,51 @@ func TestAggregateBudgetAndCache(t *testing.T) {
 		{Ok: true, DispatchedAt: base, TTFBms: 6, TTFDms: 9, TTFTms: 20, TotalMs: 100, CachedTokens: -1},
 		// 命中缓存：不进延迟分位（TTFT=1 若被计入，min 会变成 1）
 		{Ok: true, DispatchedAt: base, TTFBms: 1, TTFDms: 1, TTFTms: 1, TotalMs: 2, CachedTokens: 7},
-		{Ok: false, DispatchedAt: base, ErrorClass: ErrBudgetExhausted, TTFDms: 30, TTFTms: -1, TotalMs: 900},
-		{Ok: false, DispatchedAt: base, ErrorClass: ErrBudgetExhausted, TTFDms: 31, TTFTms: -1, TotalMs: 901},
+		{Ok: false, DispatchedAt: base, ErrorClass: ErrBudgetExhausted, TTFBms: 7, TTFDms: 30, TTFTms: -1, TotalMs: 900},
+		{Ok: false, DispatchedAt: base, ErrorClass: ErrBudgetExhausted, TTFBms: 8, TTFDms: 31, TTFTms: -1, TotalMs: 901},
 		{Ok: false, DispatchedAt: base, ErrorClass: ErrRateLimited, TTFBms: -1, TTFTms: -1, TotalMs: -1},
 	}
 	m := aggregate(samples)
 	if m.Requests != 6 || m.Errors != 1 || m.BudgetExhausted != 2 || m.CacheHits != 1 {
 		t.Fatalf("requests/errors/budget/cache = %d/%d/%d/%d，期望 6/1/2/1", m.Requests, m.Errors, m.BudgetExhausted, m.CacheHits)
 	}
-	// 错误率分母剔除预算耗尽：1 / (6-2) = 0.25
-	if m.ErrorRate != 0.25 {
-		t.Errorf("errorRate = %v，期望 0.25", m.ErrorRate)
+	// 错误率 = 真错误 / 全部请求：1/6
+	if m.ErrorRate != 0.1667 {
+		t.Errorf("errorRate = %v，期望 0.1667", m.ErrorRate)
 	}
 	if m.ByErrorClass[ErrBudgetExhausted] != 2 {
-		t.Errorf("byErrorClass 仍应列出预算耗尽，得 %v", m.ByErrorClass)
+		t.Errorf("byErrorClass 仍应列出输出上限用尽，得 %v", m.ByErrorClass)
 	}
 	if m.TTFTms == nil || m.TTFTms.Min != 10 || m.TTFTms.Max != 20 {
-		t.Errorf("ttft 分位应只含 2 个未命中缓存的成功样本，得 %+v", m.TTFTms)
+		t.Errorf("ttft 分位只含有正文的样本，得 %+v", m.TTFTms)
 	}
-	if m.TTFDms == nil || m.TTFDms.Min != 8 || m.TTFDms.Max != 9 {
-		t.Errorf("ttfd 分位 = %+v", m.TTFDms)
+	if m.TTFDms == nil || m.TTFDms.Min != 8 || m.TTFDms.Max != 31 {
+		t.Errorf("ttfd 分位应含输出上限用尽的样本（8..31），得 %+v", m.TTFDms)
+	}
+	if m.TTFBms == nil || m.TTFBms.Min != 5 || m.TTFBms.Max != 8 {
+		t.Errorf("ttfb 分位应含输出上限用尽的样本（5..8），得 %+v", m.TTFBms)
+	}
+	if m.TotalMs == nil || m.TotalMs.Max != 901 {
+		t.Errorf("total 分位应含输出上限用尽的样本（max 901），得 %+v", m.TotalMs)
 	}
 }
 
-// TestAggregateAllBudgetExhausted 全部预算耗尽：分母为 0 时错误率记 0，不除零
+// TestAggregateAllBudgetExhausted 推理模型全部用尽输出上限（线上 deepseek 实况）：
+// 错误率 0，延迟与吞吐照常有值，不能整档空白
 func TestAggregateAllBudgetExhausted(t *testing.T) {
-	m := aggregate([]Sample{{ErrorClass: ErrBudgetExhausted}, {ErrorClass: ErrBudgetExhausted}})
+	base := time.Unix(1000, 0)
+	m := aggregate([]Sample{
+		{ErrorClass: ErrBudgetExhausted, DispatchedAt: base, TTFBms: 900, TTFDms: 950, TTFTms: -1, TotalMs: 1000, OutputTokens: 64},
+		{ErrorClass: ErrBudgetExhausted, DispatchedAt: base.Add(time.Second), TTFBms: 910, TTFDms: 960, TTFTms: -1, TotalMs: 1000, OutputTokens: 64},
+	})
 	if m.ErrorRate != 0 || m.Errors != 0 || m.BudgetExhausted != 2 {
 		t.Errorf("errorRate/errors/budget = %v/%d/%d", m.ErrorRate, m.Errors, m.BudgetExhausted)
+	}
+	if m.TTFBms == nil || m.TTFDms == nil || m.TTFTms != nil {
+		t.Errorf("应有 ttfb/ttfd、无 ttft，得 ttfb=%+v ttfd=%+v ttft=%+v", m.TTFBms, m.TTFDms, m.TTFTms)
+	}
+	// 跨度 0s→2s，2 条请求、128 个输出 token
+	if m.ThroughputRps != 1 || m.TokensPerSec != 64 {
+		t.Errorf("吞吐 rps/tok/s = %v/%v，期望 1/64", m.ThroughputRps, m.TokensPerSec)
 	}
 }

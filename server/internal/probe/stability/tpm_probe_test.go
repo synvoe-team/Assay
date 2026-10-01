@@ -143,16 +143,18 @@ func TestEstTpmRequests(t *testing.T) {
 	}
 }
 
-// sumTokens 累计 ok 样本的输入+输出 token，跳过失败样本与缺 usage 的样本。
+// sumTokens 累计渠道正常应答样本的输入+输出 token，跳过失败样本与缺 usage 的样本。
+// 输出上限被思考用完的样本也是真实消耗的 token，必须计入（推理模型在 TPM 砝码下大多如此）。
 func TestSumTokens(t *testing.T) {
 	samples := []Sample{
-		{Ok: true, InputTokens: 3, OutputTokens: 2},      // 5
-		{Ok: true, InputTokens: 10, OutputTokens: 0},     // 10（输出缺省不计）
-		{Ok: false, InputTokens: 100, OutputTokens: 100}, // 失败不计
-		{Ok: true, InputTokens: 0, OutputTokens: 7},      // 7
+		{Ok: true, InputTokens: 3, OutputTokens: 2},                                     // 5
+		{Ok: true, InputTokens: 10, OutputTokens: 0},                                    // 10（输出缺省不计）
+		{Ok: false, InputTokens: 100, OutputTokens: 100},                                // 失败不计
+		{Ok: true, InputTokens: 0, OutputTokens: 7},                                     // 7
+		{Ok: false, ErrorClass: ErrBudgetExhausted, InputTokens: 20, OutputTokens: 256}, // 276
 	}
-	if got := sumTokens(samples); got != 22 {
-		t.Fatalf("sumTokens=%d，期望 22", got)
+	if got := sumTokens(samples); got != 298 {
+		t.Fatalf("sumTokens=%d，期望 298", got)
 	}
 	if got := sumTokens(nil); got != 0 {
 		t.Fatalf("空样本 sumTokens 应为 0，得 %d", got)

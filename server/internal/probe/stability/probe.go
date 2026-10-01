@@ -84,12 +84,18 @@ const (
 	ErrStreamAnomaly = "stream_anomaly" // 流式分片坏损/读流中断/无结束帧/流内错误事件
 	ErrSemanticEmpty = "semantic_empty" // 200 但无任何增量
 
-	// ErrBudgetExhausted 生成上限被（推理）耗尽仍无正文：是我们给的砝码太小、不是渠道故障，
-	// 不计入错误率，单独计数提醒调大生成上限
+	// ErrBudgetExhausted 输出上限（max_tokens）被思考用完、还没写出正文：渠道正常应答，
+	// 只是这条测不到 TTFT。不算错误（见 served），单独计数提醒调大输出上限
 	ErrBudgetExhausted = "budget_exhausted"
 	// ErrReasoningOnly 只有推理增量、没有正文就正常结束（上限之内）：渠道/模型问题，期望 0
 	ErrReasoningOnly = "reasoning_only"
 )
+
+// served 渠道是否正常应答了这条请求：成功，或输出上限被思考用完（我们给的上限小，不是渠道的错）。
+// 正常应答的样本首字节/首增量/耗时/吞吐/token 消耗都是真实测量，一律计入；只有 TTFT 因无正文而缺测。
+func served(s Sample) bool {
+	return s.Ok || s.ErrorClass == ErrBudgetExhausted
+}
 
 // StageOverall __overall__ 档标识 + 其排序序号（排在所有真实档之后）
 const (
@@ -118,8 +124,8 @@ type Metrics struct {
 	TTFBms  *Percentiles `json:"ttfbMs,omitempty"`
 	TotalMs *Percentiles `json:"totalMs,omitempty"`
 
-	// BudgetExhausted 生成上限被推理耗尽的条数：不计入 Errors/ErrorRate（砝码不足非渠道故障），
-	// >0 即说明 TTFT 结论不可用、应调大生成上限
+	// BudgetExhausted 输出上限被思考用完、没写出正文的条数：渠道正常应答，不计入 Errors；
+	// 这些请求测不到 TTFT，阶梯并发里 >0 即提示调大输出上限
 	BudgetExhausted int `json:"budgetExhausted,omitempty"`
 	// CacheHits 输入命中缓存的成功条数：不进延迟分位（缓存命中的 TTFT 不代表渠道真实 prefill）
 	CacheHits int `json:"cacheHits,omitempty"`

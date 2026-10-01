@@ -487,7 +487,8 @@ func (q *Queries) FailOrphanTasks(ctx context.Context, arg FailOrphanTasksParams
 }
 
 const finishTask = `-- name: FinishTask :execrows
-update tasks set status = $2, error = $3, finished_at = now()
+update tasks set status = $2, error = $3, finished_at = now(),
+  progress_done = case when $2 = 'succeeded' then progress_total else progress_done end
 where id = $1 and status = 'running'
 `
 
@@ -497,7 +498,8 @@ type FinishTaskParams struct {
 	Error  *string
 }
 
-// 终态不可逆：running 之外（已 canceled/failed）不允许再改
+// 终态不可逆：running 之外（已 canceled/failed）不允许再改。
+// 成功即进度满：稳定性分母是最坏预估，提前收敛时实发少于分母，不补满进度条会停在半截
 func (q *Queries) FinishTask(ctx context.Context, arg FinishTaskParams) (int64, error) {
 	result, err := q.db.Exec(ctx, finishTask, arg.ID, arg.Status, arg.Error)
 	if err != nil {

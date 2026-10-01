@@ -127,9 +127,9 @@ func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, b
 }
 
 // classifyStream HTTP 200 且流扫描无错之后的判定，返回空分类 = 成功。顺序即优先级：
-// 流没走完 → 断流；有正文 → 成功；没正文时先看是不是我们给的生成上限被耗尽（砝码不足、
-// 非渠道故障），再看是不是只吐了推理，最后才是什么都没有的空响应。
-// 预算耗尽有两个信号：协议原生的「因上限结束」，以及 completion 达到上限的计数兜底
+// 流没走完 → 断流；有正文 → 成功；没正文时先看是不是我们给的输出上限被思考用完（渠道正常应答，
+// 见 served），再看是不是只吐了推理，最后才是什么都没有的空响应。
+// 输出上限用尽有两个信号：协议原生的「因上限结束」，以及 completion 达到上限的计数兜底
 // （有的中转站丢 finish_reason；隐藏推理的模型连增量都不给）。
 func classifyStream(r protocol.Result, maxTokens int) (class, msg string) {
 	switch {
@@ -138,7 +138,7 @@ func classifyStream(r protocol.Result, maxTokens int) (class, msg string) {
 	case r.SawContent:
 		return "", ""
 	case r.HitMaxTokens || (r.Usage.Ok && r.Usage.Completion >= int64(maxTokens)):
-		return ErrBudgetExhausted, fmt.Sprintf("生成上限 %d 被耗尽仍无正文（推理模型砝码不足，非渠道故障）", maxTokens)
+		return ErrBudgetExhausted, fmt.Sprintf("输出上限 %d 已被思考用完、还没写出正文（推理模型常见，渠道正常应答，不算错误）", maxTokens)
 	case r.SawReasoning:
 		return ErrReasoningOnly, "只有推理增量、没有正文就结束了"
 	default:

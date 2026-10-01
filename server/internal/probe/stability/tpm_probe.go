@@ -58,11 +58,11 @@ func estTpmRequests(p StabilityParams) int {
 	return total
 }
 
-// sumTokens 累计一档 ok 样本的真实 token 消耗（输入+输出，缺 usage 的样本记 0）。
+// sumTokens 累计一档正常应答样本的真实 token 消耗（输入+输出，缺 usage 的样本记 0；输出上限被思考用完的也是真实消耗）。
 func sumTokens(samples []Sample) int {
 	total := 0
 	for _, s := range samples {
-		if !s.Ok {
+		if !served(s) {
 			continue
 		}
 		if s.InputTokens > 0 {

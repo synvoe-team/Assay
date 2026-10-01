@@ -129,6 +129,7 @@ func (w *StabilityWorker) work(ctx context.Context, taskID uuid.UUID) error {
 			return fmt.Errorf("未知检测项 %q", id)
 		}
 		curOffset := offset
+		probeDone := 0 // Progress 在各 probe 的锁内串行回调、probe 之间顺序执行，无需再加锁
 		in := stability.RunInput{
 			Probe:  id,
 			Target: target,
@@ -155,6 +156,7 @@ func (w *StabilityWorker) work(ctx context.Context, taskID uuid.UUID) error {
 				})
 			},
 			Progress: func(ctx context.Context, done, _ int) {
+				probeDone = done
 				global := curOffset + done
 				if err := w.q.UpdateTaskProgress(ctx, db.UpdateTaskProgressParams{
 					ID: taskID, ProgressTotal: task.ProgressTotal, ProgressDone: int32(global),
@@ -168,9 +170,9 @@ func (w *StabilityWorker) work(ctx context.Context, taskID uuid.UUID) error {
 		if err := p.Run(ctx, in); err != nil {
 			return fmt.Errorf("检测项 %s: %w", id, err)
 		}
-		// probe 提前收敛（碰硬闸）时实发请求可能少于预估，offset 仍按预估推进，
-		// 保证多 probe 的进度不重叠；任务照常 succeeded（total 不必打满）。
-		offset += p.Info.EstRequests(params)
+		// 下一项从实发请求数接着计：probe 提前收敛（未探到限速、碰硬闸）时实发远少于预估，
+		// 按预估推进会让进度跳空、分母又被硬闸压住后越界
+		offset += probeDone
 	}
 
 	if _, err := w.q.FinishTask(ctx, db.FinishTaskParams{ID: taskID, Status: "succeeded"}); err != nil {
