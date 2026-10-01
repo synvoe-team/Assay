@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -21,12 +22,16 @@ type outcome struct {
 	Error      string
 
 	TTFB    time.Duration
-	TTFT    time.Duration
+	TTFD    time.Duration // 首个非空增量（推理或正文）
+	HasTTFD bool
+	TTFT    time.Duration // 首个非空正文增量
 	HasTTFT bool
 	Total   time.Duration
+	HasBody bool // 拿到 200 并读过响应体（TTFB/Total 有意义）
 
-	Usage  protocol.Usage
-	Header http.Header // 所有响应都留存，供 RPM probe 读限速头（2xx 也带余量头）
+	Usage     protocol.Usage
+	HTTPProto string      // 实际协商的协议版本（resp.Proto，如 HTTP/1.1）
+	Header    http.Header // 所有响应都留存，供 RPM probe 读限速头（2xx 也带余量头）
 }
 
 // timingReader 包裹响应体，在首个非空 Read 打 TTFB 点，其余透传。
@@ -47,7 +52,7 @@ func (t *timingReader) Read(p []byte) (int, error) {
 }
 
 // doRequest 发一次最小压测请求并观测时序 + usage。
-// TTFB 由 timingReader 打点、TTFT 由 codec 的 onFirstToken 打点、total 为整流耗时。
+// TTFB 由 timingReader 打点、TTFD/TTFT 由 codec 的两个钩子打点、total 为整流耗时。
 func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, baseURL, apiKey, model, content string, maxTokens, timeoutMs int) outcome {
 	var o outcome
 	body, err := codec.LoadBody(model, content, maxTokens)
@@ -81,6 +86,7 @@ func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, b
 	defer resp.Body.Close()
 
 	o.HTTPStatus = resp.StatusCode
+	o.HTTPProto = resp.Proto
 	o.Header = resp.Header // 限速头在成功响应上也可能带余量（x-ratelimit-remaining-*）
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		o.ErrorClass = classifyHTTP(resp.StatusCode)
@@ -94,28 +100,50 @@ func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, b
 	}
 
 	tr := &timingReader{r: resp.Body, start: start}
-	usage, err := codec.ScanStream(tr, func() {
-		o.TTFT = time.Since(start)
-		o.HasTTFT = true
+	res, err := codec.ScanStream(tr, protocol.Hooks{
+		OnFirstDelta: func() {
+			o.TTFD = time.Since(start)
+			o.HasTTFD = true
+		},
+		OnFirstContent: func() {
+			o.TTFT = time.Since(start)
+			o.HasTTFT = true
+		},
 	})
 	o.Total = time.Since(start)
+	o.HasBody = true
 	if tr.got {
 		o.TTFB = tr.ttfb
 	}
+	o.Usage = res.Usage
 	if err != nil {
 		o.ErrorClass = ErrStreamAnomaly
 		o.Error = "读取响应流失败: " + truncateOneLine(err.Error())
 		return o
 	}
-	o.Usage = usage
-	// semantic_empty：200 但既无内容 delta 又无 completion token，等于空响应
-	if !o.HasTTFT && (!usage.Ok || usage.Completion == 0) {
-		o.ErrorClass = ErrSemanticEmpty
-		o.Error = "HTTP 200 但响应无内容"
-		return o
-	}
-	o.Ok = true
+	o.ErrorClass, o.Error = classifyStream(res, maxTokens)
+	o.Ok = o.ErrorClass == ""
 	return o
+}
+
+// classifyStream HTTP 200 且流扫描无错之后的判定，返回空分类 = 成功。顺序即优先级：
+// 流没走完 → 断流；有正文 → 成功；没正文时先看是不是我们给的生成上限被耗尽（砝码不足、
+// 非渠道故障），再看是不是只吐了推理，最后才是什么都没有的空响应。
+// 预算耗尽有两个信号：协议原生的「因上限结束」，以及 completion 达到上限的计数兜底
+// （有的中转站丢 finish_reason；隐藏推理的模型连增量都不给）。
+func classifyStream(r protocol.Result, maxTokens int) (class, msg string) {
+	switch {
+	case !r.Completed:
+		return ErrStreamAnomaly, "流未结束即中断（无结束帧）"
+	case r.SawContent:
+		return "", ""
+	case r.HitMaxTokens || (r.Usage.Ok && r.Usage.Completion >= int64(maxTokens)):
+		return ErrBudgetExhausted, fmt.Sprintf("生成上限 %d 被耗尽仍无正文（推理模型砝码不足，非渠道故障）", maxTokens)
+	case r.SawReasoning:
+		return ErrReasoningOnly, "只有推理增量、没有正文就结束了"
+	default:
+		return ErrSemanticEmpty, "HTTP 200 但响应无任何增量"
+	}
 }
 
 func classifyHTTP(status int) string {
@@ -131,7 +159,9 @@ func classifyHTTP(status int) string {
 	}
 }
 
-// sampleFrom outcome → Sample：ok 才记延迟/计量，否则一律 NULL（<0/空）。
+// sampleFrom outcome → Sample：测到什么记什么，没测到的取负值（落库转 NULL）。
+// 失败但拿到 200 的样本（预算耗尽/只有推理/断流）也保留时序与计量，作证据链；
+// 评估期的延迟分位与吞吐只取成功样本，不受影响。
 func sampleFrom(stage string, stageIndex, seq int, warmup bool, dispatchedAt time.Time, proto string, o outcome) Sample {
 	s := Sample{
 		Stage:        stage,
@@ -142,25 +172,31 @@ func sampleFrom(stage string, stageIndex, seq int, warmup bool, dispatchedAt tim
 		Warmup:       warmup,
 		Ok:           o.Ok,
 		HTTPStatus:   o.HTTPStatus,
+		HTTPProto:    o.HTTPProto,
+		ErrorClass:   o.ErrorClass,
+		Error:        o.Error,
 		TTFBms:       -1,
+		TTFDms:       -1,
 		TTFTms:       -1,
 		TotalMs:      -1,
 		InputTokens:  -1,
 		OutputTokens: -1,
+		CachedTokens: -1,
 	}
-	if o.Ok {
+	if o.HasBody {
 		s.TTFBms = int(o.TTFB.Milliseconds())
-		if o.HasTTFT {
-			s.TTFTms = int(o.TTFT.Milliseconds())
-		}
 		s.TotalMs = int(o.Total.Milliseconds())
-		if o.Usage.Ok {
-			s.InputTokens = int(o.Usage.Prompt)
-			s.OutputTokens = int(o.Usage.Completion)
-		}
-	} else {
-		s.ErrorClass = o.ErrorClass
-		s.Error = o.Error
+	}
+	if o.HasTTFD {
+		s.TTFDms = int(o.TTFD.Milliseconds())
+	}
+	if o.HasTTFT {
+		s.TTFTms = int(o.TTFT.Milliseconds())
+	}
+	if o.Usage.Ok {
+		s.InputTokens = int(o.Usage.Prompt)
+		s.OutputTokens = int(o.Usage.Completion)
+		s.CachedTokens = int(o.Usage.Cached)
 	}
 	return s
 }

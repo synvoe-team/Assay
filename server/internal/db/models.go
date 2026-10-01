@@ -85,14 +85,17 @@ type StabilitySample struct {
 	Protocol     string
 	DispatchedAt time.Time
 	TtfbMs       pgtype.Int4
+	TtfdMs       pgtype.Int4
 	TtftMs       pgtype.Int4
 	TotalMs      pgtype.Int4
 	Ok           bool
 	HttpStatus   pgtype.Int4
+	HttpProto    *string
 	ErrorClass   *string
 	Error        *string
 	InputTokens  pgtype.Int4
 	OutputTokens pgtype.Int4
+	CachedTokens pgtype.Int4
 	Warmup       bool
 }
 

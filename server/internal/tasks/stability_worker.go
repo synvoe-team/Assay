@@ -212,14 +212,17 @@ func sampleParams(taskID uuid.UUID, probeID string, s stability.Sample) db.Inser
 		Protocol:     s.Protocol,
 		DispatchedAt: s.DispatchedAt,
 		TtfbMs:       int4OrNull(s.TTFBms),
+		TtfdMs:       int4OrNull(s.TTFDms),
 		TtftMs:       int4OrNull(s.TTFTms),
 		TotalMs:      int4OrNull(s.TotalMs),
 		Ok:           s.Ok,
 		HttpStatus:   int4Positive(s.HTTPStatus), // 0（传输层未拿到状态）→ NULL
+		HttpProto:    strOrNull(s.HTTPProto),
 		ErrorClass:   strOrNull(s.ErrorClass),
 		Error:        strOrNull(s.Error),
 		InputTokens:  int4OrNull(s.InputTokens),
 		OutputTokens: int4OrNull(s.OutputTokens),
+		CachedTokens: int4OrNull(s.CachedTokens),
 		Warmup:       s.Warmup,
 	}
 }

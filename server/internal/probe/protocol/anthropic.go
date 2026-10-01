@@ -41,55 +41,59 @@ func (anthropic) LoadBody(model, content string, maxTokens int) ([]byte, error) 
 	})
 }
 
-func (anthropic) ScanStream(r io.Reader, onFirstToken func()) (Usage, error) {
-	var u Usage
-	first := false
-	err := scanSSE(r, func(m map[string]any) {
+func (anthropic) ScanStream(r io.Reader, h Hooks) (Result, error) {
+	var res Result
+	tr := tracker{h: h, res: &res}
+	_, err := scanSSE(r, func(m map[string]any) error {
 		typ, _ := strField(m, "type")
 		switch typ {
 		case "message_start":
 			// 初始 usage：input_tokens 全量给出，output_tokens 起始（后续在 message_delta 累计）
-			msg, ok := objField(m, "message")
-			if !ok {
-				return
-			}
+			msg, _ := objField(m, "message")
 			uv, ok := objField(msg, "usage")
 			if !ok {
-				return
+				return nil
 			}
 			if p, ok := intField(uv, "input_tokens"); ok {
-				u.Prompt = p
-				u.Ok = true
+				res.Prompt = p
+				res.Ok = true
 			}
+			res.Cached, _ = intField(uv, "cache_read_input_tokens")
 		case "content_block_delta":
-			if first {
-				return
-			}
-			delta, ok := objField(m, "delta")
-			if !ok {
-				return
-			}
-			// 仅 text_delta 是文本内容；input_json_delta（工具入参）不算首 token
-			if dt, _ := strField(delta, "type"); dt != "text_delta" {
-				return
-			}
-			if txt, ok := strField(delta, "text"); ok && txt != "" {
-				first = true
-				if onFirstToken != nil {
-					onFirstToken()
-				}
+			delta, _ := objField(m, "delta")
+			// input_json_delta（工具入参）既非正文也非推理，不计
+			switch dt, _ := strField(delta, "type"); dt {
+			case "text_delta":
+				txt, _ := strField(delta, "text")
+				tr.content(txt)
+			case "thinking_delta":
+				txt, _ := strField(delta, "thinking")
+				tr.reasoning(txt)
 			}
 		case "message_delta":
+			if d, ok := objField(m, "delta"); ok {
+				if sr, _ := strField(d, "stop_reason"); sr == "max_tokens" {
+					res.HitMaxTokens = true
+				}
+			}
 			// 终帧顶层 usage 带累计 output_tokens
 			uv, ok := objField(m, "usage")
 			if !ok {
-				return
+				return nil
 			}
 			if c, ok := intField(uv, "output_tokens"); ok {
-				u.Completion = c
-				u.Ok = true
+				res.Completion = c
+				res.Ok = true
 			}
+		case "message_stop":
+			res.Completed = true
+		case "error":
+			ev, _ := objField(m, "error")
+			kind, _ := strField(ev, "type")
+			msg, _ := strField(ev, "message")
+			return streamError(kind, msg)
 		}
+		return nil
 	})
-	return u, err
+	return res, err
 }

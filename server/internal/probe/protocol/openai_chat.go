@@ -44,43 +44,59 @@ func (openaiChat) LoadBody(model, content string, maxTokens int) ([]byte, error)
 	})
 }
 
-func (openaiChat) ScanStream(r io.Reader, onFirstToken func()) (Usage, error) {
-	var u Usage
-	first := false
-	err := scanSSE(r, func(m map[string]any) {
+func (openaiChat) ScanStream(r io.Reader, h Hooks) (Result, error) {
+	var res Result
+	tr := tracker{h: h, res: &res}
+	done, err := scanSSE(r, func(m map[string]any) error {
+		// 部分 OpenAI 兼容上游在 200 之后于流里下发 {"error":{...}} 分片
+		if ev, ok := objField(m, "error"); ok {
+			kind, _ := strField(ev, "type")
+			if kind == "" {
+				kind, _ = strField(ev, "code")
+			}
+			msg, _ := strField(ev, "message")
+			return streamError(kind, msg)
+		}
 		// 尾帧 usage：include_usage 生效时末帧 choices 为空、usage 非空
 		if uv, ok := objField(m, "usage"); ok {
 			if p, ok := intField(uv, "prompt_tokens"); ok {
-				u.Prompt = p
-				u.Ok = true
+				res.Prompt = p
+				res.Ok = true
 			}
 			if c, ok := intField(uv, "completion_tokens"); ok {
-				u.Completion = c
-				u.Ok = true
+				res.Completion = c
+				res.Ok = true
+			}
+			if d, ok := objField(uv, "prompt_tokens_details"); ok {
+				res.Cached, _ = intField(d, "cached_tokens")
 			}
 		}
-		if first {
-			return
-		}
-		// 首个非空 delta.content → TTFT
-		choices, ok := m["choices"].([]any)
-		if !ok || len(choices) == 0 {
-			return
-		}
-		c0, ok := choices[0].(map[string]any)
-		if !ok {
-			return
-		}
-		delta, ok := objField(c0, "delta")
-		if !ok {
-			return
-		}
-		if txt, ok := strField(delta, "content"); ok && txt != "" {
-			first = true
-			if onFirstToken != nil {
-				onFirstToken()
+		choices, _ := m["choices"].([]any)
+		for _, ch := range choices {
+			c, ok := ch.(map[string]any)
+			if !ok {
+				continue
+			}
+			if delta, ok := objField(c, "delta"); ok {
+				// 推理增量字段各家不一：DeepSeek/Kimi/Qwen 用 reasoning_content，OpenRouter/vLLM 用 reasoning
+				rc, _ := strField(delta, "reasoning_content")
+				tr.reasoning(rc)
+				rs, _ := strField(delta, "reasoning")
+				tr.reasoning(rs)
+				txt, _ := strField(delta, "content")
+				tr.content(txt)
+			}
+			if fr, ok := strField(c, "finish_reason"); ok && fr != "" {
+				res.Completed = true
+				if fr == "length" {
+					res.HitMaxTokens = true
+				}
 			}
 		}
+		return nil
 	})
-	return u, err
+	if done {
+		res.Completed = true
+	}
+	return res, err
 }

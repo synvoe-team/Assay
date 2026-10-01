@@ -13,19 +13,25 @@ create table stability_samples (
     protocol      text not null,
     -- open-loop 排定发起时刻（非实际起飞）：闭环阶梯下 = 实际发起；用于测协调遗漏
     dispatched_at timestamptz not null,
-    ttfb_ms       int,                       -- 首字节耗时（失败留 NULL）
-    ttft_ms       int,                       -- 首个非空内容 delta 耗时（失败/无内容留 NULL）
-    total_ms      int,                       -- 整请求耗时（失败留 NULL）
+    ttfb_ms       int,                       -- 首字节耗时（未拿到 200 响应体留 NULL）
+    ttfd_ms       int,                       -- 首个非空增量（推理或正文）耗时（无增量留 NULL）
+    ttft_ms       int,                       -- 首个非空正文增量耗时（无正文留 NULL）
+    total_ms      int,                       -- 整请求耗时（未拿到 200 响应体留 NULL）
     ok            boolean not null,
     http_status   int,
+    http_proto    text,                      -- 实际协商的协议版本（如 HTTP/1.1；传输层失败留 NULL）
     -- 错误分类一等公民：ok=true 时留 NULL；失败必落其一，评估期按类堆叠
     error_class   text,
     error         text,
     input_tokens  int,                       -- usage.prompt（无则 NULL）
     output_tokens int,                       -- usage.completion（无则 NULL）
+    cached_tokens int,                       -- 输入中命中缓存的 token（无 usage 则 NULL；>0 的样本不进延迟分位）
     warmup        boolean not null default false,  -- 预热样本，评估时剔除
+    -- budget_exhausted = 生成上限被推理耗尽仍无正文（砝码不足，不计入错误率）；
+    -- reasoning_only = 只有推理没有正文就正常结束（渠道/模型问题）
     check (error_class is null or error_class in
-        ('transport', 'http_4xx', 'rate_limited', 'http_5xx', 'stream_anomaly', 'semantic_empty'))
+        ('transport', 'http_4xx', 'rate_limited', 'http_5xx', 'stream_anomaly', 'semantic_empty',
+         'budget_exhausted', 'reasoning_only'))
 );
 
 create index stability_samples_task_probe_stage on stability_samples (task_id, probe, stage_index, seq);

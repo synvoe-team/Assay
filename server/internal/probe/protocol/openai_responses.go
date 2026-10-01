@@ -43,42 +43,58 @@ func (openaiResponses) LoadBody(model, content string, maxTokens int) ([]byte, e
 	})
 }
 
-func (openaiResponses) ScanStream(r io.Reader, onFirstToken func()) (Usage, error) {
-	var u Usage
-	first := false
-	err := scanSSE(r, func(m map[string]any) {
+func (openaiResponses) ScanStream(r io.Reader, h Hooks) (Result, error) {
+	var res Result
+	tr := tracker{h: h, res: &res}
+	_, err := scanSSE(r, func(m map[string]any) error {
 		typ, _ := strField(m, "type")
 		switch typ {
 		case "response.output_text.delta":
-			if first {
-				return
-			}
-			if txt, ok := strField(m, "delta"); ok && txt != "" {
-				first = true
-				if onFirstToken != nil {
-					onFirstToken()
-				}
-			}
+			txt, _ := strField(m, "delta")
+			tr.content(txt)
+		case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
+			txt, _ := strField(m, "delta")
+			tr.reasoning(txt)
 		case "response.completed", "response.incomplete":
 			// max_output_tokens 打满时终态常是 incomplete 而非 completed，usage 同样带；
-			// 两者都必须接受，否则小 max_tokens 压测大面积漏 usage。
+			// 两者都是正常结束，否则小 max_tokens 压测会大面积误判为断流。
+			res.Completed = true
 			resp, ok := objField(m, "response")
 			if !ok {
-				return
+				return nil
+			}
+			if d, ok := objField(resp, "incomplete_details"); ok {
+				if reason, _ := strField(d, "reason"); reason == "max_output_tokens" {
+					res.HitMaxTokens = true
+				}
 			}
 			uv, ok := objField(resp, "usage")
 			if !ok {
-				return
+				return nil
 			}
 			if p, ok := intField(uv, "input_tokens"); ok {
-				u.Prompt = p
-				u.Ok = true
+				res.Prompt = p
+				res.Ok = true
 			}
 			if c, ok := intField(uv, "output_tokens"); ok {
-				u.Completion = c
-				u.Ok = true
+				res.Completion = c
+				res.Ok = true
 			}
+			if d, ok := objField(uv, "input_tokens_details"); ok {
+				res.Cached, _ = intField(d, "cached_tokens")
+			}
+		case "response.failed":
+			resp, _ := objField(m, "response")
+			ev, _ := objField(resp, "error")
+			code, _ := strField(ev, "code")
+			msg, _ := strField(ev, "message")
+			return streamError(code, msg)
+		case "error":
+			code, _ := strField(m, "code")
+			msg, _ := strField(m, "message")
+			return streamError(code, msg)
 		}
+		return nil
 	})
-	return u, err
+	return res, err
 }

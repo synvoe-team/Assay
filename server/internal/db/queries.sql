@@ -329,9 +329,9 @@ delete from stability_metrics where task_id = $1;
 -- name: InsertStabilitySample :exec
 insert into stability_samples
     (task_id, probe, stage, stage_index, seq, protocol, dispatched_at,
-     ttfb_ms, ttft_ms, total_ms, ok, http_status, error_class, error,
-     input_tokens, output_tokens, warmup)
-values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17);
+     ttfb_ms, ttfd_ms, ttft_ms, total_ms, ok, http_status, http_proto, error_class, error,
+     input_tokens, output_tokens, cached_tokens, warmup)
+values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20);
 
 -- name: UpsertStabilityMetric :exec
 -- 评估期聚合点落库（同任务重跑幂等覆盖）
@@ -352,8 +352,8 @@ order by probe, stage_index;
 -- name: ListStabilitySamples :many
 -- 导出证据链：全量逐请求时序
 select probe, stage, stage_index, seq, protocol, dispatched_at,
-       ttfb_ms, ttft_ms, total_ms, ok, http_status, error_class, error,
-       input_tokens, output_tokens, warmup
+       ttfb_ms, ttfd_ms, ttft_ms, total_ms, ok, http_status, http_proto, error_class, error,
+       input_tokens, output_tokens, cached_tokens, warmup
 from stability_samples
 where task_id = $1
 order by probe, stage_index, seq;

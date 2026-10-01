@@ -99,7 +99,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":7,"output
 
 const responsesIncomplete = `data: {"type":"response.output_text.delta","delta":"Yo"}
 
-data: {"type":"response.incomplete","response":{"usage":{"input_tokens":8,"output_tokens":16}}}
+data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":8,"output_tokens":16}}}
 `
 
 // 带真实 event: 行的 anthropic 六段式，兼验非 data: 行被跳过
@@ -125,37 +125,206 @@ event: message_stop
 data: {"type":"message_stop"}
 `
 
-// TestScanStream 校验流式 TTFT 首非空 delta 识别 + 尾帧 usage 提取（三协议 + responses 双终态）
+// TestScanStream 校验流式 TTFT 首非空 delta 识别 + 尾帧 usage 提取 + 结束帧识别（三协议 + responses 双终态）
 func TestScanStream(t *testing.T) {
 	cases := []struct {
 		name           string
 		proto          string
 		stream         string
-		wantFirstCalls int
 		wantPrompt     int64
 		wantCompletion int64
+		wantHitMax     bool
 	}{
-		{"chat include_usage", ProtocolOpenAIChat, chatStream, 1, 10, 5},
-		{"responses completed", ProtocolOpenAIResponses, responsesCompleted, 1, 7, 3},
-		{"responses incomplete", ProtocolOpenAIResponses, responsesIncomplete, 1, 8, 16},
-		{"anthropic message_delta", ProtocolAnthropicMessages, anthropicStream, 1, 12, 9},
+		{"chat include_usage", ProtocolOpenAIChat, chatStream, 10, 5, false},
+		{"responses completed", ProtocolOpenAIResponses, responsesCompleted, 7, 3, false},
+		// max_output_tokens 打满时终态是 incomplete：仍是正常结束，且标记打满上限
+		{"responses incomplete", ProtocolOpenAIResponses, responsesIncomplete, 8, 16, true},
+		{"anthropic message_delta", ProtocolAnthropicMessages, anthropicStream, 12, 9, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := mustGet(t, tc.proto)
-			calls := 0
-			u, err := c.ScanStream(strings.NewReader(tc.stream), func() { calls++ })
+			deltas, contents := 0, 0
+			r, err := c.ScanStream(strings.NewReader(tc.stream), Hooks{
+				OnFirstDelta:   func() { deltas++ },
+				OnFirstContent: func() { contents++ },
+			})
 			if err != nil {
 				t.Fatalf("ScanStream 出错: %v", err)
 			}
-			if calls != tc.wantFirstCalls {
-				t.Errorf("onFirstToken 调用 %d 次，期望 %d（空 delta 不得触发）", calls, tc.wantFirstCalls)
+			if deltas != 1 || contents != 1 {
+				t.Errorf("首增量回调 %d 次、首正文回调 %d 次，期望各 1 次（空 delta 不得触发）", deltas, contents)
 			}
-			if !u.Ok {
+			if !r.Completed {
+				t.Error("见到结束帧时 Completed 应为 true")
+			}
+			if !r.SawContent || r.SawReasoning {
+				t.Errorf("SawContent=%v SawReasoning=%v，期望 true/false", r.SawContent, r.SawReasoning)
+			}
+			if r.HitMaxTokens != tc.wantHitMax {
+				t.Errorf("HitMaxTokens=%v，期望 %v", r.HitMaxTokens, tc.wantHitMax)
+			}
+			if !r.Usage.Ok {
 				t.Fatal("usage.Ok 应为 true")
 			}
-			if u.Prompt != tc.wantPrompt || u.Completion != tc.wantCompletion {
-				t.Errorf("usage = {%d,%d}，期望 {%d,%d}", u.Prompt, u.Completion, tc.wantPrompt, tc.wantCompletion)
+			if r.Usage.Prompt != tc.wantPrompt || r.Usage.Completion != tc.wantCompletion {
+				t.Errorf("usage = {%d,%d}，期望 {%d,%d}", r.Usage.Prompt, r.Usage.Completion, tc.wantPrompt, tc.wantCompletion)
+			}
+		})
+	}
+}
+
+// TestScanStreamNoEndFrame 流在结束帧之前被掐断（CF 524 / 连接重置的典型形态）：Completed=false
+func TestScanStreamNoEndFrame(t *testing.T) {
+	cases := []struct{ name, proto, stream string }{
+		{"chat 无 finish_reason 无 [DONE]", ProtocolOpenAIChat, `data: {"choices":[{"delta":{"content":"Hel"}}]}
+`},
+		{"responses 无终态事件", ProtocolOpenAIResponses, `data: {"type":"response.output_text.delta","delta":"Hel"}
+`},
+		{"anthropic 无 message_stop", ProtocolAnthropicMessages, `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}
+`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := mustGet(t, tc.proto).ScanStream(strings.NewReader(tc.stream), Hooks{})
+			if err != nil {
+				t.Fatalf("出错: %v", err)
+			}
+			if r.Completed {
+				t.Error("没有结束帧时 Completed 应为 false")
+			}
+			if !r.SawContent {
+				t.Error("已收到正文，SawContent 应为 true")
+			}
+		})
+	}
+}
+
+// TestScanStreamReasoning 推理模型：先推理增量后正文 / 只有推理被上限截断。
+// 首增量回调在推理增量时触发、首正文回调只认正文。
+func TestScanStreamReasoning(t *testing.T) {
+	cases := []struct {
+		name        string
+		proto       string
+		stream      string
+		wantContent bool
+		wantHitMax  bool
+	}{
+		{"chat reasoning_content 后正文", ProtocolOpenAIChat, `data: {"choices":[{"delta":{"reasoning_content":"想"}}]}
+
+data: {"choices":[{"delta":{"content":"答"},"finish_reason":"stop"}]}
+
+data: [DONE]
+`, true, false},
+		{"chat reasoning 字段被 length 截断", ProtocolOpenAIChat, `data: {"choices":[{"delta":{"reasoning":"想"}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"length"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":64}}
+
+data: [DONE]
+`, false, true},
+		{"responses reasoning_text 被截断", ProtocolOpenAIResponses, `data: {"type":"response.reasoning_text.delta","delta":"想"}
+
+data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":8,"output_tokens":16}}}
+`, false, true},
+		{"responses reasoning_summary 后正文", ProtocolOpenAIResponses, `data: {"type":"response.reasoning_summary_text.delta","delta":"想"}
+
+data: {"type":"response.output_text.delta","delta":"答"}
+
+data: {"type":"response.completed","response":{"usage":{"input_tokens":8,"output_tokens":20}}}
+`, true, false},
+		{"anthropic thinking 被 max_tokens 截断", ProtocolAnthropicMessages, `data: {"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":1}}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"想"}}
+
+data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":64}}
+
+data: {"type":"message_stop"}
+`, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deltas, contents := 0, 0
+			r, err := mustGet(t, tc.proto).ScanStream(strings.NewReader(tc.stream), Hooks{
+				OnFirstDelta:   func() { deltas++ },
+				OnFirstContent: func() { contents++ },
+			})
+			if err != nil {
+				t.Fatalf("出错: %v", err)
+			}
+			if !r.SawReasoning || !r.Completed {
+				t.Errorf("SawReasoning=%v Completed=%v，期望均为 true", r.SawReasoning, r.Completed)
+			}
+			if deltas != 1 {
+				t.Errorf("首增量回调 %d 次，期望 1（推理增量即触发）", deltas)
+			}
+			if r.SawContent != tc.wantContent || (contents == 1) != tc.wantContent {
+				t.Errorf("SawContent=%v 首正文回调 %d 次，期望正文=%v", r.SawContent, contents, tc.wantContent)
+			}
+			if r.HitMaxTokens != tc.wantHitMax {
+				t.Errorf("HitMaxTokens=%v，期望 %v", r.HitMaxTokens, tc.wantHitMax)
+			}
+		})
+	}
+}
+
+// TestScanStreamCached 三协议缓存命中 token 提取（断言破缓存用）
+func TestScanStreamCached(t *testing.T) {
+	cases := []struct{ name, proto, stream string }{
+		{"chat prompt_tokens_details", ProtocolOpenAIChat, `data: {"choices":[{"delta":{"content":"a"},"finish_reason":"stop"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":7}}}
+
+data: [DONE]
+`},
+		{"responses input_tokens_details", ProtocolOpenAIResponses, `data: {"type":"response.output_text.delta","delta":"a"}
+
+data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":1,"input_tokens_details":{"cached_tokens":7}}}}
+`},
+		{"anthropic cache_read_input_tokens", ProtocolAnthropicMessages, `data: {"type":"message_start","message":{"usage":{"input_tokens":3,"cache_read_input_tokens":7,"output_tokens":1}}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"a"}}
+
+data: {"type":"message_stop"}
+`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := mustGet(t, tc.proto).ScanStream(strings.NewReader(tc.stream), Hooks{})
+			if err != nil {
+				t.Fatalf("出错: %v", err)
+			}
+			if r.Usage.Cached != 7 {
+				t.Errorf("Cached=%d，期望 7", r.Usage.Cached)
+			}
+		})
+	}
+}
+
+// TestScanStreamErrorEvent 流内错误事件（200 之后上游在流里报错）必须返回 err，且保留错误类型
+func TestScanStreamErrorEvent(t *testing.T) {
+	cases := []struct{ name, proto, stream, wantInErr string }{
+		{"chat 顶层 error 分片", ProtocolOpenAIChat, `data: {"choices":[{"delta":{"content":"a"}}]}
+
+data: {"error":{"type":"server_error","message":"upstream reset"}}
+`, "server_error"},
+		{"responses response.failed", ProtocolOpenAIResponses, `data: {"type":"response.failed","response":{"error":{"code":"server_error","message":"boom"}}}
+`, "server_error"},
+		{"responses error 事件", ProtocolOpenAIResponses, `data: {"type":"error","code":"rate_limit_exceeded","message":"slow down"}
+`, "rate_limit_exceeded"},
+		{"anthropic overloaded_error", ProtocolAnthropicMessages, `event: error
+data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
+`, "overloaded_error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := mustGet(t, tc.proto).ScanStream(strings.NewReader(tc.stream), Hooks{})
+			if err == nil {
+				t.Fatal("流内错误事件应返回 err")
+			}
+			if !strings.Contains(err.Error(), tc.wantInErr) {
+				t.Errorf("err=%q 应包含错误类型 %q", err, tc.wantInErr)
 			}
 		})
 	}
@@ -167,12 +336,15 @@ func TestScanStreamNoUsage(t *testing.T) {
 
 data: [DONE]
 `
-	u, err := mustGet(t, ProtocolOpenAIChat).ScanStream(strings.NewReader(s), nil)
+	r, err := mustGet(t, ProtocolOpenAIChat).ScanStream(strings.NewReader(s), Hooks{})
 	if err != nil {
 		t.Fatalf("出错: %v", err)
 	}
-	if u.Ok {
+	if r.Usage.Ok {
 		t.Error("无 usage 帧时 Ok 应为 false")
+	}
+	if !r.Completed {
+		t.Error("[DONE] 即结束帧，Completed 应为 true")
 	}
 }
 
@@ -180,7 +352,7 @@ data: [DONE]
 func TestScanStreamBadChunk(t *testing.T) {
 	const s = `data: {not json}
 `
-	_, err := mustGet(t, ProtocolOpenAIChat).ScanStream(strings.NewReader(s), nil)
+	_, err := mustGet(t, ProtocolOpenAIChat).ScanStream(strings.NewReader(s), Hooks{})
 	if err == nil {
 		t.Error("坏损分片应返回 err")
 	}

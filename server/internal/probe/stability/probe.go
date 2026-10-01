@@ -58,15 +58,18 @@ type Sample struct {
 
 	Ok         bool
 	HTTPStatus int    // 0 = 传输层未拿到状态 → NULL
+	HTTPProto  string // 实际协商的协议版本；"" = 传输层未拿到响应 → NULL
 	ErrorClass string // "" = 成功 → NULL
 	Error      string // "" → NULL
 
 	TTFBms  int // <0 → NULL
-	TTFTms  int // <0 → NULL
+	TTFDms  int // 首个非空增量（推理或正文）耗时；<0 → NULL
+	TTFTms  int // 首个非空正文增量耗时；<0 → NULL
 	TotalMs int // <0 → NULL
 
 	InputTokens  int // <0 = 无 usage → NULL
 	OutputTokens int // <0 = 无 usage → NULL
+	CachedTokens int // 输入中命中缓存的 token；<0 = 无 usage → NULL
 }
 
 // 错误分类（与迁移 check 约束一致）
@@ -75,8 +78,14 @@ const (
 	ErrHTTP4xx       = "http_4xx"       // 4xx（非 429）
 	ErrRateLimited   = "rate_limited"   // 429
 	ErrHTTP5xx       = "http_5xx"       // 5xx
-	ErrStreamAnomaly = "stream_anomaly" // 流式分片坏损/读流中断
-	ErrSemanticEmpty = "semantic_empty" // 200 但无任何内容
+	ErrStreamAnomaly = "stream_anomaly" // 流式分片坏损/读流中断/无结束帧/流内错误事件
+	ErrSemanticEmpty = "semantic_empty" // 200 但无任何增量
+
+	// ErrBudgetExhausted 生成上限被（推理）耗尽仍无正文：是我们给的砝码太小、不是渠道故障，
+	// 不计入错误率，单独计数提醒调大生成上限
+	ErrBudgetExhausted = "budget_exhausted"
+	// ErrReasoningOnly 只有推理增量、没有正文就正常结束（上限之内）：渠道/模型问题，期望 0
+	ErrReasoningOnly = "reasoning_only"
 )
 
 // StageOverall __overall__ 档标识 + 其排序序号（排在所有真实档之后）
@@ -101,8 +110,8 @@ type Metrics struct {
 	Errors    int     `json:"errors"`
 	ErrorRate float64 `json:"errorRate"`
 
-	TTFTms *Percentiles `json:"ttftMs,omitempty"`
-	TTFBms *Percentiles `json:"ttfbMs,omitempty"`
+	TTFTms  *Percentiles `json:"ttftMs,omitempty"`
+	TTFBms  *Percentiles `json:"ttfbMs,omitempty"`
 	TotalMs *Percentiles `json:"totalMs,omitempty"`
 
 	ThroughputRps float64 `json:"throughputRps,omitempty"`
