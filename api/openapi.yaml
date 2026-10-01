@@ -2020,11 +2020,11 @@ components:
           maximum: 1000
           default: 20
         rpmStageSec:
-          description: RPM 每档发压时长（秒）
+          description: RPM 每档发压时长（秒）；前一半为热身（消化渠道残留计数/突发额度），只用后一半判限速
           type: integer
-          minimum: 1
-          maximum: 300
-          default: 10
+          minimum: 2
+          maximum: 600
+          default: 120
         rpmMaxInFlight:
           description: RPM 在途请求上限（防雪崩兜底）
           type: integer
@@ -2062,11 +2062,11 @@ components:
           maximum: 1000000
           default: 2000
         tpmStageSec:
-          description: TPM 每档发压时长（秒）
+          description: TPM 每档发压时长（秒）；前一半为热身，只用后一半判限速
           type: integer
-          minimum: 1
-          maximum: 300
-          default: 10
+          minimum: 2
+          maximum: 600
+          default: 120
         tpmMaxInFlight:
           description: TPM 在途请求上限（防雪崩兜底）
           type: integer
@@ -2095,12 +2095,18 @@ components:
           description: 全局请求硬闸；累计达到即收敛停止
           type: integer
           minimum: 1
-          default: 2000
+          default: 10000
         maxTotalTokens:
           description: 全局 token 硬闸；累计达到即收敛停止
           type: integer
           minimum: 1
           default: 2000000
+        maxDurationSec:
+          description: 整任务墙钟上限（秒）；到点停派新请求、在途的跑完，已出结果照常出报告并标截断
+          type: integer
+          minimum: 60
+          maximum: 7200
+          default: 3600
         requestTimeoutMs:
           description: 单请求超时（毫秒）
           type: integer
@@ -2201,10 +2207,20 @@ components:
           type: number
         ttftMs:
           $ref: "#/components/schemas/StabilityPercentiles"
+        ttfdMs:
+          description: 首个非空增量（推理或正文）耗时分位；推理模型「开始干活」的时刻，非推理模型≈TTFT
+          allOf:
+            - $ref: "#/components/schemas/StabilityPercentiles"
         ttfbMs:
           $ref: "#/components/schemas/StabilityPercentiles"
         totalMs:
           $ref: "#/components/schemas/StabilityPercentiles"
+        budgetExhausted:
+          description: 生成上限被推理耗尽仍无正文的条数；不计入 errors/errorRate（砝码不足非渠道故障），>0 即 TTFT 结论不可用
+          type: integer
+        cacheHits:
+          description: 输入命中缓存的成功条数；不计入延迟分位
+          type: integer
         throughputRps:
           description: 达成吞吐（请求/秒，按样本时间窗计）
           type: number
@@ -2234,6 +2250,13 @@ components:
         reachedCap:
           description: __overall__ 探到速率护栏顶仍未限速（真实边界≥护栏）
           type: boolean
+        truncated:
+          description: __overall__ RPM/TPM 搜索被全局硬闸截断；未出现限速档时收敛值只是下界，出现过则二分未完成
+          type: boolean
+        truncatedBy:
+          description: __overall__ 先触发的硬闸
+          type: string
+          enum: [requests, tokens, duration]
         targetTokenRate:
           description: TPM 开环档目标 token 到达率（token/s）
           type: number
@@ -2316,7 +2339,13 @@ components:
           type: string
         error:
           type: string
+        httpProto:
+          description: 实际协商的协议版本（如 HTTP/1.1）
+          type: string
         ttfbMs:
+          type: integer
+        ttfdMs:
+          description: 首个非空增量（推理或正文）耗时
           type: integer
         ttftMs:
           type: integer
@@ -2325,6 +2354,9 @@ components:
         inputTokens:
           type: integer
         outputTokens:
+          type: integer
+        cachedTokens:
+          description: 输入中命中缓存的 token 数
           type: integer
         warmup:
           type: boolean

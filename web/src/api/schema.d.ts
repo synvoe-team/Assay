@@ -1134,8 +1134,8 @@ export interface components {
              */
             rpmMaxRate: number;
             /**
-             * @description RPM 每档发压时长（秒）
-             * @default 10
+             * @description RPM 每档发压时长（秒）；前一半为热身（消化渠道残留计数/突发额度），只用后一半判限速
+             * @default 120
              */
             rpmStageSec: number;
             /**
@@ -1169,8 +1169,8 @@ export interface components {
              */
             tpmMaxRate: number;
             /**
-             * @description TPM 每档发压时长（秒）
-             * @default 10
+             * @description TPM 每档发压时长（秒）；前一半为热身，只用后一半判限速
+             * @default 120
              */
             tpmStageSec: number;
             /**
@@ -1195,7 +1195,7 @@ export interface components {
             tpmBinarySteps: number;
             /**
              * @description 全局请求硬闸；累计达到即收敛停止
-             * @default 2000
+             * @default 10000
              */
             maxTotalRequests: number;
             /**
@@ -1203,6 +1203,11 @@ export interface components {
              * @default 2000000
              */
             maxTotalTokens: number;
+            /**
+             * @description 整任务墙钟上限（秒）；到点停派新请求、在途的跑完，已出结果照常出报告并标截断
+             * @default 3600
+             */
+            maxDurationSec: number;
             /**
              * @description 单请求超时（毫秒）
              * @default 60000
@@ -1257,8 +1262,14 @@ export interface components {
             errors: number;
             errorRate: number;
             ttftMs?: components["schemas"]["StabilityPercentiles"];
+            /** @description 首个非空增量（推理或正文）耗时分位；推理模型「开始干活」的时刻，非推理模型≈TTFT */
+            ttfdMs?: components["schemas"]["StabilityPercentiles"];
             ttfbMs?: components["schemas"]["StabilityPercentiles"];
             totalMs?: components["schemas"]["StabilityPercentiles"];
+            /** @description 生成上限被推理耗尽仍无正文的条数；不计入 errors/errorRate（砝码不足非渠道故障），>0 即 TTFT 结论不可用 */
+            budgetExhausted?: number;
+            /** @description 输入命中缓存的成功条数；不计入延迟分位 */
+            cacheHits?: number;
             /** @description 达成吞吐（请求/秒，按样本时间窗计） */
             throughputRps?: number;
             /** @description 输出 token 吞吐（token/秒） */
@@ -1279,6 +1290,13 @@ export interface components {
             convergedRpm?: number;
             /** @description __overall__ 探到速率护栏顶仍未限速（真实边界≥护栏） */
             reachedCap?: boolean;
+            /** @description __overall__ RPM/TPM 搜索被全局硬闸截断；未出现限速档时收敛值只是下界，出现过则二分未完成 */
+            truncated?: boolean;
+            /**
+             * @description __overall__ 先触发的硬闸
+             * @enum {string}
+             */
+            truncatedBy?: "requests" | "tokens" | "duration";
             /** @description TPM 开环档目标 token 到达率（token/s） */
             targetTokenRate?: number;
             /** @description TPM 开环档实测 token 吞吐（token/s，输入+输出都计） */
@@ -1326,11 +1344,17 @@ export interface components {
             httpStatus?: number;
             errorClass?: string;
             error?: string;
+            /** @description 实际协商的协议版本（如 HTTP/1.1） */
+            httpProto?: string;
             ttfbMs?: number;
+            /** @description 首个非空增量（推理或正文）耗时 */
+            ttfdMs?: number;
             ttftMs?: number;
             totalMs?: number;
             inputTokens?: number;
             outputTokens?: number;
+            /** @description 输入中命中缓存的 token 数 */
+            cachedTokens?: number;
             warmup: boolean;
         };
         /** @description 证据链自足的 JSON 导出：任务快照 + 指标报告 + 全量逐请求样本 */

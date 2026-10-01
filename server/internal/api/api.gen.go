@@ -147,6 +147,27 @@ func (e Protocol) Valid() bool {
 	}
 }
 
+// Defines values for StabilityMetricsTruncatedBy.
+const (
+	Duration StabilityMetricsTruncatedBy = "duration"
+	Requests StabilityMetricsTruncatedBy = "requests"
+	Tokens   StabilityMetricsTruncatedBy = "tokens"
+)
+
+// Valid indicates whether the value is a known member of the StabilityMetricsTruncatedBy enum.
+func (e StabilityMetricsTruncatedBy) Valid() bool {
+	switch e {
+	case Duration:
+		return true
+	case Requests:
+		return true
+	case Tokens:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for TaskStatus.
 const (
 	Canceled  TaskStatus = "canceled"
@@ -701,8 +722,14 @@ type StabilityMetrics struct {
 	// AchievedTokenRate TPM 开环档实测 token 吞吐（token/s，输入+输出都计）
 	AchievedTokenRate *float32 `json:"achievedTokenRate,omitempty"`
 
+	// BudgetExhausted 生成上限被推理耗尽仍无正文的条数；不计入 errors/errorRate（砝码不足非渠道故障），>0 即 TTFT 结论不可用
+	BudgetExhausted *int `json:"budgetExhausted,omitempty"`
+
 	// ByErrorClass 各错误分类计数
 	ByErrorClass *map[string]int `json:"byErrorClass,omitempty"`
+
+	// CacheHits 输入命中缓存的成功条数；不计入延迟分位
+	CacheHits *int `json:"cacheHits,omitempty"`
 
 	// Concurrency 阶梯并发档的并发数（其它 probe 缺省）
 	Concurrency *int `json:"concurrency,omitempty"`
@@ -742,12 +769,24 @@ type StabilityMetrics struct {
 	// TotalMs 一组延迟观测的分位数摘要（评估期确定性计算，单位毫秒）
 	TotalMs *StabilityPercentiles `json:"totalMs,omitempty"`
 
+	// Truncated __overall__ RPM/TPM 搜索被全局硬闸截断；未出现限速档时收敛值只是下界，出现过则二分未完成
+	Truncated *bool `json:"truncated,omitempty"`
+
+	// TruncatedBy __overall__ 先触发的硬闸
+	TruncatedBy *StabilityMetricsTruncatedBy `json:"truncatedBy,omitempty"`
+
 	// TtfbMs 一组延迟观测的分位数摘要（评估期确定性计算，单位毫秒）
 	TtfbMs *StabilityPercentiles `json:"ttfbMs,omitempty"`
+
+	// TtfdMs 首个非空增量（推理或正文）耗时分位；推理模型「开始干活」的时刻，非推理模型≈TTFT
+	TtfdMs *StabilityPercentiles `json:"ttfdMs,omitempty"`
 
 	// TtftMs 一组延迟观测的分位数摘要（评估期确定性计算，单位毫秒）
 	TtftMs *StabilityPercentiles `json:"ttftMs,omitempty"`
 }
+
+// StabilityMetricsTruncatedBy __overall__ 先触发的硬闸
+type StabilityMetricsTruncatedBy string
 
 // StabilityPercentiles 一组延迟观测的分位数摘要（评估期确定性计算，单位毫秒）
 type StabilityPercentiles struct {
@@ -792,14 +831,19 @@ type StabilityReport struct {
 
 // StabilitySample 一次压测请求的逐请求原始时序（证据链源；失败样本延迟/计量字段缺省）
 type StabilitySample struct {
+	// CachedTokens 输入中命中缓存的 token 数
+	CachedTokens *int      `json:"cachedTokens,omitempty"`
 	DispatchedAt time.Time `json:"dispatchedAt"`
 	Error        *string   `json:"error,omitempty"`
 	ErrorClass   *string   `json:"errorClass,omitempty"`
-	HttpStatus   *int      `json:"httpStatus,omitempty"`
-	InputTokens  *int      `json:"inputTokens,omitempty"`
-	Ok           bool      `json:"ok"`
-	OutputTokens *int      `json:"outputTokens,omitempty"`
-	Probe        string    `json:"probe"`
+
+	// HttpProto 实际协商的协议版本（如 HTTP/1.1）
+	HttpProto    *string `json:"httpProto,omitempty"`
+	HttpStatus   *int    `json:"httpStatus,omitempty"`
+	InputTokens  *int    `json:"inputTokens,omitempty"`
+	Ok           bool    `json:"ok"`
+	OutputTokens *int    `json:"outputTokens,omitempty"`
+	Probe        string  `json:"probe"`
 
 	// Protocol 渠道支持的接口协议
 	Protocol   Protocol `json:"protocol"`
@@ -808,8 +852,11 @@ type StabilitySample struct {
 	StageIndex int      `json:"stageIndex"`
 	TotalMs    *int     `json:"totalMs,omitempty"`
 	TtfbMs     *int     `json:"ttfbMs,omitempty"`
-	TtftMs     *int     `json:"ttftMs,omitempty"`
-	Warmup     bool     `json:"warmup"`
+
+	// TtfdMs 首个非空增量（推理或正文）耗时
+	TtfdMs *int `json:"ttfdMs,omitempty"`
+	TtftMs *int `json:"ttftMs,omitempty"`
+	Warmup bool `json:"warmup"`
 }
 
 // StabilityStageMetric 一档（或 __overall__ probe 级）的评估结果
@@ -871,6 +918,9 @@ type StabilityTaskParams struct {
 	// LadderMaxTokens 每请求生成上限（max_tokens 砝码，控制单请求耗时与成本）
 	LadderMaxTokens *int `json:"ladderMaxTokens,omitempty"`
 
+	// MaxDurationSec 整任务墙钟上限（秒）；到点停派新请求、在途的跑完，已出结果照常出报告并标截断
+	MaxDurationSec *int `json:"maxDurationSec,omitempty"`
+
 	// MaxTotalRequests 全局请求硬闸；累计达到即收敛停止
 	MaxTotalRequests *int `json:"maxTotalRequests,omitempty"`
 
@@ -901,7 +951,7 @@ type StabilityTaskParams struct {
 	// RpmMaxTokens RPM 每请求生成上限（只关心请求速率，取小）
 	RpmMaxTokens *int `json:"rpmMaxTokens,omitempty"`
 
-	// RpmStageSec RPM 每档发压时长（秒）
+	// RpmStageSec RPM 每档发压时长（秒）；前一半为热身（消化渠道残留计数/突发额度），只用后一半判限速
 	RpmStageSec *int `json:"rpmStageSec,omitempty"`
 
 	// RpmStartRate RPM 实测起始到达率（req/s，开环）
@@ -922,7 +972,7 @@ type StabilityTaskParams struct {
 	// TpmMaxTokensPerReq TPM 每请求 max_tokens 砝码（顶格数数 prompt 保证打满输出；输入+输出都计）
 	TpmMaxTokensPerReq *int `json:"tpmMaxTokensPerReq,omitempty"`
 
-	// TpmStageSec TPM 每档发压时长（秒）
+	// TpmStageSec TPM 每档发压时长（秒）；前一半为热身，只用后一半判限速
 	TpmStageSec *int `json:"tpmStageSec,omitempty"`
 
 	// TpmStartRate TPM 实测起始 token 到达率（token/s，开环；换算请求速率发压）

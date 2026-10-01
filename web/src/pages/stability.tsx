@@ -131,6 +131,7 @@ export default function StabilityPage() {
   const [tpmBinarySteps, setTpmBinarySteps] = useState('4')
   const [maxTotalRequests, setMaxTotalRequests] = useState('2000')
   const [maxTotalTokens, setMaxTotalTokens] = useState('2000000')
+  const [maxDurationSec, setMaxDurationSec] = useState('3600')
   const [requestTimeoutMs, setRequestTimeoutMs] = useState('60000')
   const [filterStatus, setFilterStatus] = useState('all')
   const [filterChannel, setFilterChannel] = useState('all')
@@ -277,6 +278,7 @@ export default function StabilityPage() {
         tpmBinarySteps: tpmSteps,
         maxTotalRequests: totalReqCap,
         maxTotalTokens: totalTokCap,
+        maxDurationSec: Number(maxDurationSec) || 3600,
         requestTimeoutMs: Number(requestTimeoutMs) || 60000,
       },
     })
@@ -670,6 +672,18 @@ export default function StabilityPage() {
                     className="w-40"
                     value={maxTotalTokens}
                     onChange={(e) => setMaxTotalTokens(e.target.value)}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="s-maxdur">{t('stab.maxDurationSec')}</Label>
+                  <Input
+                    id="s-maxdur"
+                    type="number"
+                    min={60}
+                    max={7200}
+                    className="w-32"
+                    value={maxDurationSec}
+                    onChange={(e) => setMaxDurationSec(e.target.value)}
                   />
                 </div>
                 <div className="grid gap-2">

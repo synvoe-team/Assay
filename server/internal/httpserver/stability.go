@@ -570,6 +570,9 @@ func resolveStabilityParams(in api.StabilityTaskParams) (stability.StabilityPara
 	if in.MaxTotalTokens != nil {
 		p.MaxTotalTokens = *in.MaxTotalTokens
 	}
+	if in.MaxDurationSec != nil {
+		p.MaxDurationSec = *in.MaxDurationSec
+	}
 	if in.RequestTimeoutMs != nil {
 		p.RequestTimeoutMs = *in.RequestTimeoutMs
 	}
@@ -643,6 +646,7 @@ func stabilitySampleToAPI(r db.ListStabilitySamplesRow) api.StabilitySample {
 		DispatchedAt: r.DispatchedAt,
 		Ok:           r.Ok,
 		Warmup:       r.Warmup,
+		HttpProto:    r.HttpProto,
 		ErrorClass:   r.ErrorClass,
 		Error:        r.Error,
 	}
@@ -653,6 +657,10 @@ func stabilitySampleToAPI(r db.ListStabilitySamplesRow) api.StabilitySample {
 	if r.TtfbMs.Valid {
 		v := int(r.TtfbMs.Int32)
 		s.TtfbMs = &v
+	}
+	if r.TtfdMs.Valid {
+		v := int(r.TtfdMs.Int32)
+		s.TtfdMs = &v
 	}
 	if r.TtftMs.Valid {
 		v := int(r.TtftMs.Int32)
@@ -669,6 +677,10 @@ func stabilitySampleToAPI(r db.ListStabilitySamplesRow) api.StabilitySample {
 	if r.OutputTokens.Valid {
 		v := int(r.OutputTokens.Int32)
 		s.OutputTokens = &v
+	}
+	if r.CachedTokens.Valid {
+		v := int(r.CachedTokens.Int32)
+		s.CachedTokens = &v
 	}
 	return s
 }
