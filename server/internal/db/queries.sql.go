@@ -848,8 +848,8 @@ const insertStabilitySample = `-- name: InsertStabilitySample :exec
 insert into stability_samples
     (task_id, probe, stage, stage_index, seq, protocol, dispatched_at,
      ttfb_ms, ttfd_ms, ttft_ms, total_ms, ok, http_status, http_proto, error_class, error,
-     input_tokens, output_tokens, cached_tokens, warmup, target_input_tokens, target_output_tokens)
-values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+     input_tokens, output_tokens, cached_tokens, warmup, target_input_tokens, target_output_tokens, reasoning_tokens)
+values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 `
 
 type InsertStabilitySampleParams struct {
@@ -875,6 +875,7 @@ type InsertStabilitySampleParams struct {
 	Warmup             bool
 	TargetInputTokens  pgtype.Int4
 	TargetOutputTokens pgtype.Int4
+	ReasoningTokens    pgtype.Int4
 }
 
 func (q *Queries) InsertStabilitySample(ctx context.Context, arg InsertStabilitySampleParams) error {
@@ -901,6 +902,7 @@ func (q *Queries) InsertStabilitySample(ctx context.Context, arg InsertStability
 		arg.Warmup,
 		arg.TargetInputTokens,
 		arg.TargetOutputTokens,
+		arg.ReasoningTokens,
 	)
 	return err
 }
@@ -1257,7 +1259,7 @@ func (q *Queries) ListStabilityMetrics(ctx context.Context, taskID uuid.UUID) ([
 const listStabilitySamples = `-- name: ListStabilitySamples :many
 select probe, stage, stage_index, seq, protocol, dispatched_at,
        ttfb_ms, ttfd_ms, ttft_ms, total_ms, ok, http_status, http_proto, error_class, error,
-       input_tokens, output_tokens, cached_tokens, warmup, target_input_tokens, target_output_tokens
+       input_tokens, output_tokens, cached_tokens, warmup, target_input_tokens, target_output_tokens, reasoning_tokens
 from stability_samples
 where task_id = $1
 order by probe, stage_index, seq
@@ -1285,6 +1287,7 @@ type ListStabilitySamplesRow struct {
 	Warmup             bool
 	TargetInputTokens  pgtype.Int4
 	TargetOutputTokens pgtype.Int4
+	ReasoningTokens    pgtype.Int4
 }
 
 // 导出证据链：全量逐请求时序
@@ -1319,6 +1322,7 @@ func (q *Queries) ListStabilitySamples(ctx context.Context, taskID uuid.UUID) ([
 			&i.Warmup,
 			&i.TargetInputTokens,
 			&i.TargetOutputTokens,
+			&i.ReasoningTokens,
 		); err != nil {
 			return nil, err
 		}

@@ -147,10 +147,11 @@ func (s InputSpec) target(nonce, stage string, seq, n int) int {
 
 // Workload 负载画像（三个 probe 共用）
 type Workload struct {
-	Input           InputSpec `json:"input"`
-	CacheHitRate    float64   `json:"cacheHitRate,omitempty"`    // 目标缓存命中率 h ∈ [0,0.95]
-	Output          int       `json:"output,omitempty"`          // 输出 token 目标；0 = 各 probe 默认生成上限
-	DisableThinking bool      `json:"disableThinking,omitempty"` // 按协议官方参数关思考
+	Input        InputSpec `json:"input"`
+	CacheHitRate float64   `json:"cacheHitRate,omitempty"` // 目标缓存命中率 h ∈ [0,0.95]
+	Output       int       `json:"output,omitempty"`       // 输出 token 目标；0 = 各 probe 默认生成上限
+	// Thinking 思考控制：default 不干预 / auto 预检自动探测关思考写法 / 指定某种写法（protocol.Thinking*）
+	Thinking string `json:"thinking,omitempty"`
 }
 
 // sharedTokens 共享前缀 token 数 ≈ h × 输入期望值（任务内固定，递增/抖动也按均值）
@@ -237,6 +238,10 @@ func (in RunInput) spec(stage string, seq, n int, def outputDefault) reqSpec {
 		MaxTokens:   w.maxTokens(def),
 		TargetInput: w.Input.target(in.Nonce, stage, seq, n),
 	}
+	// 预检从上游报错读出了模型上限：输出目标随之钳住，偏差按实发上限算、预扣也不虚高
+	if c := in.Plan.Shape.MaxTokensCap; c > 0 && sp.MaxTokens > c {
+		sp.MaxTokens = c
+	}
 	switch {
 	case w.Output > 0 || def.Fill:
 		sp.Question, sp.TargetOutput = countPrompt, sp.MaxTokens
@@ -269,14 +274,19 @@ func (in RunInput) nominal(sp reqSpec) int64 {
 	return int64(input + sp.MaxTokens)
 }
 
-// exec 发一条已过硬闸预扣的请求，并按实测 usage 结算预扣。
-// 没拿到 2xx 响应体（传输失败/HTTP 错误）退回预扣；拿到了却没带 usage 的按名义值保守计。
+// exec 按预检定下的请求形态发一条已过硬闸预扣的请求
 func (in RunInput) exec(ctx context.Context, sp reqSpec, p protocol.Prompt, est int64) outcome {
+	return in.send(ctx, sp, p, in.Plan.Shape, est)
+}
+
+// send 发一条已过硬闸预扣的请求，并按实测 usage 结算预扣。
+// 没拿到 2xx 响应体（传输失败/HTTP 错误）退回预扣；拿到了却没带 usage 的按名义值保守计。
+func (in RunInput) send(ctx context.Context, sp reqSpec, p protocol.Prompt, shape protocol.Shape, est int64) outcome {
 	o := doRequest(ctx, in.Client, in.Codec, in.Target.BaseURL, in.APIKey, protocol.Load{
-		Model:           in.Target.Model,
-		Prompt:          p,
-		MaxTokens:       sp.MaxTokens,
-		DisableThinking: in.Params.Workload.DisableThinking,
+		Model:     in.Target.Model,
+		Prompt:    p,
+		MaxTokens: sp.MaxTokens,
+		Shape:     shape,
 	}, in.Params.RequestTimeoutMs)
 	actual := est
 	switch {
@@ -289,9 +299,10 @@ func (in RunInput) exec(ctx context.Context, sp reqSpec, p protocol.Prompt, est 
 	return o
 }
 
-// emit 落一档指标；__overall__ 行附上定标结果（名义比/实测比/偏差进报告）
+// emit 落一档指标；__overall__ 行附上预检与定标结果（做过的兼容调整、名义比/实测比/偏差进报告）
 func (in RunInput) emit(ctx context.Context, sm StageMetrics) error {
 	if sm.Stage == StageOverall {
+		sm.Metrics.Preflight = in.Plan.Preflight
 		sm.Metrics.Calibration = in.Plan.Calibration
 	}
 	if in.Metric == nil {
@@ -300,9 +311,11 @@ func (in RunInput) emit(ctx context.Context, sm StageMetrics) error {
 	return in.Metric(ctx, sm)
 }
 
-// Plan 准备期产出：填充文本的实测字符/token 比 + 共享前缀。不塑形时为零值。
+// Plan 准备期产出：预检定下的请求形态 + 填充文本的字符/token 比与共享前缀（不塑形时后几项为零值）
 type Plan struct {
-	Ratio        float64 // 填充文本字符/token（定标实测）
+	Shape        protocol.Shape // 全任务一致的请求兼容形态
+	Preflight    *Preflight
+	Ratio        float64 // 填充文本字符/token（定标实测；定标失败时取名义比）
 	Shared       string  // 共享前缀 S，任务内字节相同；h=0 为空
 	SharedTokens int
 	Calibration  *Calibration
@@ -317,6 +330,9 @@ type Calibration struct {
 	DeviationPct    float64 `json:"deviationPct"`              // (实测比 − 名义比) / 名义比 × 100
 	SharedTokens    int     `json:"sharedTokens,omitempty"`    // 共享前缀 token 数（h>0）
 	CacheWarmCached *int    `json:"cacheWarmCached,omitempty"` // 最后一条写缓存请求的 cached_tokens（应≈共享前缀）
+	// Uncalibrated 定标没测成（上游不报 usage / 定标请求失败）：按名义比塑形照跑，输入偏差无从实测或不准
+	Uncalibrated bool   `json:"uncalibrated,omitempty"`
+	Reason       string `json:"reason,omitempty"` // 没测成的原因
 }
 
 // buildPlan 按字符/token 比构造共享前缀（种子 = 任务 nonce：任务内字节相同、跨任务不同，不吃上个任务的缓存）
@@ -331,25 +347,28 @@ func buildPlan(w Workload, nonce string, ratio float64) Plan {
 	return p
 }
 
-// EstPrepRequests 准备期请求数：塑形时 1 条定标，h>0 再加写缓存（不含瞬时失败的重试）
+// EstPrepRequests 准备期请求数（进度分母）：预检 1 条（自适应重发不另计）+ 自动关思考的候选数上界
+// + 塑形时 1 条定标 + h>0 时写缓存
 func EstPrepRequests(p StabilityParams) int {
+	n := 1
+	if p.Workload.Thinking == ThinkingAuto {
+		n += len(protocol.ThinkingCandidates(p.Protocol))
+	}
 	w := p.Workload
 	switch {
 	case !w.Input.shaped():
-		return 0
 	case w.sharedTokens() > 0:
-		return 1 + cacheWarmupRequests
+		n += 1 + cacheWarmupRequests
+	default:
+		n++
 	}
-	return 1
+	return n
 }
 
-// PrepareWorkload 任务开头的准备期：定标（测字符/token 比）→ h>0 时串行写缓存。
-// 样本均标 warmup、不进统计；进度按逻辑请求计（重试不重复计）。不塑形时不发请求、返回零值。
+// PrepareWorkload 任务开头的准备期：预检定请求形态（自适应兼容 + 自动关思考）→ 塑形时定标（测字符/token 比）
+// → h>0 时串行写缓存。样本均标 warmup、不进统计；进度按逻辑请求计（重试与自适应重发不重复计）。
+// 只有预检确认渠道根本连不上（4xx 调整穷尽）才返回 error；定标/写缓存失败都降级照跑。
 func PrepareWorkload(ctx context.Context, in RunInput) (Plan, error) {
-	w := in.Params.Workload
-	if !w.Input.shaped() {
-		return Plan{}, nil
-	}
 	total, done := EstPrepRequests(in.Params), 0
 	step := func() {
 		done++
@@ -357,13 +376,22 @@ func PrepareWorkload(ctx context.Context, in RunInput) (Plan, error) {
 			in.Progress(ctx, done, total)
 		}
 	}
+	shape, pf, err := in.preflight(ctx, step)
+	if err != nil {
+		return Plan{}, err
+	}
+	in.Plan = Plan{Shape: shape, Preflight: pf}
+	w := in.Params.Workload
+	if !w.Input.shaped() {
+		return in.Plan, nil
+	}
 	cal, err := in.calibrate(ctx)
 	if err != nil {
 		return Plan{}, err
 	}
 	step()
 	plan := buildPlan(w, in.Nonce, cal.MeasuredRatio)
-	plan.Calibration = cal
+	plan.Shape, plan.Preflight, plan.Calibration = shape, pf, cal
 	cal.SharedTokens = plan.SharedTokens
 	if plan.SharedTokens == 0 {
 		return plan, nil
@@ -371,12 +399,12 @@ func PrepareWorkload(ctx context.Context, in RunInput) (Plan, error) {
 	// 写缓存：失败不致命，命中与否由各档实测命中率评判
 	for i := range cacheWarmupRequests {
 		p := protocol.Prompt{Shared: plan.Shared, Unique: uniquePrompt(in.Nonce, stageCacheWrite, i, paragraphQuestion)}
-		o, err := in.prepRequest(ctx, stageCacheWrite, 1, i, p)
+		o, err := in.prepRequest(ctx, reqSpec{Stage: stageCacheWrite, Seq: i, MaxTokens: prepMaxTokens}, prepIndexCache, p, shape)
 		if err != nil {
 			return Plan{}, err
 		}
 		step()
-		if o.Usage.Ok {
+		if o.Usage.CachedOk {
 			cached := int(o.Usage.Cached)
 			cal.CacheWarmCached = &cached
 		}
@@ -385,24 +413,29 @@ func PrepareWorkload(ctx context.Context, in RunInput) (Plan, error) {
 }
 
 // calibrate 定标：发一条 calibChars 字符的填充文本，比例 = 填充字符 / (prompt_tokens − 标记与问题的名义开销)。
-// 渠道不回 usage 就无法塑形，fail-fast 报清原因，不带着错误比例跑完整个任务。
+// 测不成（上游不报 usage、请求失败、计量异常）不中止：按名义比塑形照跑，报告标「未定标」并写明原因。
 func (in RunInput) calibrate(ctx context.Context) (*Calibration, error) {
 	tag := uniquePrompt(in.Nonce, stageCalib, 0, "")
 	tail := paragraphBreak + paragraphQuestion
 	p := protocol.Prompt{Unique: tag + fillerText(in.Nonce+"|"+stageCalib, calibChars) + tail}
-	o, err := in.prepRequest(ctx, stageCalib, 0, 0, p)
+	o, err := in.prepRequest(ctx, reqSpec{Stage: stageCalib, MaxTokens: prepMaxTokens}, prepIndexCalib, p, in.Plan.Shape)
 	if err != nil {
 		return nil, err
 	}
-	if !o.Usage.Ok {
-		if o.ErrorClass != "" && o.ErrorClass != ErrBudgetExhausted {
-			return nil, fmt.Errorf("定标请求失败（%s）：%s", o.ErrorClass, o.Error)
-		}
-		return nil, errors.New("定标请求的响应没带 usage（prompt_tokens），无法测字符/token 比；该渠道不能做输入塑形，请把输入模式改为不塑形")
+	nominal := &Calibration{Chars: calibChars, NominalRatio: nominalCharsPerToken, MeasuredRatio: nominalCharsPerToken, Uncalibrated: true}
+	switch {
+	case !o.Usage.Ok && o.HasBody:
+		nominal.Reason = "上游响应不带 usage（prompt_tokens），测不了字符/token 比"
+		return nominal, nil
+	case !o.Usage.Ok:
+		nominal.Reason = "定标请求失败：" + o.Error
+		return nominal, nil
 	}
 	tokens := o.Usage.Prompt - int64(nominalTokens(tag+tail))
 	if tokens <= 0 {
-		return nil, fmt.Errorf("定标请求回报 prompt_tokens=%d，小于标记与问题本身，渠道计量异常", o.Usage.Prompt)
+		nominal.PromptTokens = int(o.Usage.Prompt)
+		nominal.Reason = fmt.Sprintf("上游回报 prompt_tokens=%d，小于标记与问题本身，计量异常", o.Usage.Prompt)
+		return nominal, nil
 	}
 	ratio := float64(calibChars) / float64(tokens)
 	return &Calibration{
@@ -414,10 +447,10 @@ func (in RunInput) calibrate(ctx context.Context) (*Calibration, error) {
 	}, nil
 }
 
-// prepRequest 发一条准备期请求（生成上限 1）：过硬闸预扣 → 发送 → 落 warmup 样本。
+// prepRequest 按给定形态发一条准备期请求：过硬闸预扣 → 发送 → 落 warmup 样本。
 // 传输/限流/5xx/断流这类瞬时失败按退避重试，至多 prepAttempts 次；返回最后一次的观测。
-func (in RunInput) prepRequest(ctx context.Context, stage string, stageIndex, seq int, p protocol.Prompt) (outcome, error) {
-	sp := reqSpec{Stage: stage, Seq: seq, MaxTokens: 1}
+// error 只在 ctx 取消、样本落库失败、被全局硬闸拦下时返回。
+func (in RunInput) prepRequest(ctx context.Context, sp reqSpec, stageIndex int, p protocol.Prompt, shape protocol.Shape) (outcome, error) {
 	est := int64(nominalTokens(p.Text()) + sp.MaxTokens)
 	var o outcome
 	for attempt := 1; ; attempt++ {
@@ -425,7 +458,7 @@ func (in RunInput) prepRequest(ctx context.Context, stage string, stageIndex, se
 			return o, fmt.Errorf("准备期请求被全局硬闸（%s）拦下，请调大上限", in.Caps.Reason())
 		}
 		at := time.Now()
-		o = in.exec(ctx, sp, p, est)
+		o = in.send(ctx, sp, p, shape, est)
 		if err := ctx.Err(); err != nil {
 			return o, err
 		}

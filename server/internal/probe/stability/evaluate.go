@@ -111,9 +111,10 @@ func aggregate(samples []Sample, h float64) Metrics {
 	return m
 }
 
-// reasoned 正常应答里出现过推理：输出上限被思考用完（隐藏推理的模型连增量都不给），或首增量早于首正文
+// reasoned 正常应答里出现过推理：输出上限被思考用完、usage 报了推理 token（隐藏推理的模型连增量都不给），
+// 或首增量早于首正文（纯空白增量不算首增量，见 protocol.tracker）
 func reasoned(s Sample) bool {
-	return s.ErrorClass == ErrBudgetExhausted || (s.TTFDms >= 0 && s.TTFTms >= 0 && s.TTFDms < s.TTFTms)
+	return s.ErrorClass == ErrBudgetExhausted || s.ReasoningTokens > 0 || (s.TTFDms >= 0 && s.TTFTms >= 0 && s.TTFDms < s.TTFTms)
 }
 
 // deviation 目标 vs 实测的偏差分布：只取正常应答、有目标且有 usage 的样本。

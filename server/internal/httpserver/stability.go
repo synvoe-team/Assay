@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -27,7 +28,9 @@ const taskKindStability = "stability"
 
 // stabilityFootnotes 报告口径脚注：测量原点/分位数算法/预热剔除等，随报告与导出下发（证据链自足）。
 var stabilityFootnotes = []string{
-	"TTFB=响应体首个非空字节到达耗时；TTFD=首个非空增量（推理或正文）到达耗时；TTFT=首个非空正文增量到达耗时；均以平台发出请求为唯一测量原点。",
+	"TTFB=响应体首个非空字节到达耗时；TTFD=首个非空增量（推理或正文）到达耗时；TTFT=首个非空正文增量到达耗时；均以平台发出请求为唯一测量原点。纯空白增量不算首增量/首字。",
+	"推理识别：reasoning_content / reasoning 字段、正文开头的 <think>…</think> 段（未开 reasoning parser 的自部署与部分中转把思考塞进正文）、usage 明细里的推理 token 都算推理，不算正文。",
+	"任务开头先发预检（计预热、不进统计）：按上游实际反应定下全任务的请求形态——报错点名的字段针对性处理（改用 max_completion_tokens、去掉 stream_options、钳生成上限、anthropic 改 Bearer 认证、剔除不认识的关思考参数或自定义字段），没点名的逐项剔除可选参数、通过后再把先剔掉的逐个装回验证（上游能收的保留）；指定的关思考写法被拒收而模型会思考时自动改试其余写法；只有认证/模型/路径类错误才中止任务。稳定性检测以跑通为先，参数支持度属质量检测范畴。",
 	"请求固定走 HTTP/1.1、多连接（对齐官方 SDK 默认行为），每条样本记录实际协商的协议版本。",
 	"每条 prompt 带任务内唯一标记，破渠道整条响应缓存；未设目标缓存命中率时，输入命中缓存（cached_tokens>0）的正常应答样本不计入延迟分位。",
 	"成功 = HTTP 200 + 流走到协议结束帧 + 有正文；200 之后流被掐断、无结束帧或流内报错计为流异常。",
@@ -39,26 +42,105 @@ var stabilityFootnotes = []string{
 	"TPM 实测为开环恒定 token 到达率：每请求 max_tokens 砝码 + 顶格数数 prompt 打满输出，按「输入+输出都计」的每请求 token 权重（输入目标期望值 + 输出目标）换算请求速率发压；热身与判定同 RPM，实测 token 吞吐取判定段响应 usage 真实值，二分收敛可持续 TPM 边界。",
 	"收敛值标「截断」表示搜索撞上总请求/总 token/整任务时长上限：尚未出现限速档时它只是下界（真实边界 ≥ 该值），已出现限速档时二分未完成、精度不足。总 token 上限按「输入目标 + 输出目标」在发出前预扣、出结果后按实测补差。",
 	"负载画像·输入：按「确定性英文填充文本 × 实测字符/token 比」塑形，问题放在最后一句。任务开头发 1 条定标请求（计预热、不进统计）读渠道回报的 prompt_tokens 测出比例，名义比/实测比/偏差见报告；目标输入 vs 实测输入的 |偏差| p95 超 ±10% 时该档标黄。",
-	"负载画像·缓存：目标命中率 h>0 时每条 prompt 以约 h×输入目标、任务内字节相同的共享前缀开头（anthropic 放独立 content block 并加 cache_control，openai 两协议直接拼在最前面走自动前缀缓存），唯一标记紧随其后；定标后串行发 2 条写缓存请求（计预热）。实测命中率 = Σcached / Σinput（正常应答样本），偏离 h 超 ±0.10 即「渠道缓存未按预期命中」；h>0 时命中缓存的样本照常计入延迟分位。",
+	"负载画像·缓存：目标命中率 h>0 时每条 prompt 以约 h×输入目标、任务内字节相同的共享前缀开头（anthropic 放独立 content block 并加 cache_control，openai 两协议直接拼在最前面走自动前缀缓存，chat 可选显式 cache_control 断点），唯一标记紧随其后；定标后串行发 2 条写缓存请求（计预热）。实测命中率 = Σcached / Σinput（上游报了缓存字段的正常应答样本；压根不报则无从判断，不当未命中），偏离 h 超 ±0.10 即「渠道缓存未按预期命中」；h>0 时命中缓存的样本照常计入延迟分位。",
 	"负载画像·输出：设了输出目标时三个检测项一律 max_tokens=目标并用顶格数数 prompt 诱导写满，报告给出目标输出 vs 实测 completion 的偏差（推理模型的 completion 含思考 token）。",
 }
 
-// thinkingFootnotes 请求了关思考时的口径说明；有正常应答仍出现推理（关不掉）时追加条数，提醒 TTFT 含思考耗时
-func thinkingFootnotes(params api.StabilityTaskParams, stages []api.StabilityStageMetric) []string {
-	if params.Workload == nil || params.Workload.DisableThinking == nil || !*params.Workload.DisableThinking {
-		return nil
-	}
-	notes := []string{"已请求关闭思考：openai_chat 发 thinking.type=disabled（DeepSeek/GLM/Kimi 等厂商扩展），openai_responses 发 reasoning.effort=none，anthropic 发 thinking.type=disabled。"}
+// preflightFootnotes 预检结论 → 报告脚注：做过的兼容调整、关思考的结果、上游缺什么（usage/流式）、定标是否测成。
+// 能力缺失一律写成「降级照跑 + 可能是该模型/渠道不支持」，不当配置错误。旧任务没有预检结论时不出。
+func preflightFootnotes(params api.StabilityTaskParams, stages []api.StabilityStageMetric) []string {
+	var pf *api.StabilityPreflight
+	var cal *api.StabilityCalibration
 	seen := 0
 	for _, s := range stages {
-		if s.Stage == stability.StageOverall && s.Metrics.ReasoningSeen != nil {
+		if s.Stage != stability.StageOverall {
+			continue
+		}
+		if pf == nil {
+			pf = s.Metrics.Preflight
+		}
+		if cal == nil {
+			cal = s.Metrics.Calibration
+		}
+		if s.Metrics.ReasoningSeen != nil {
 			seen += *s.Metrics.ReasoningSeen
 		}
 	}
-	if seen > 0 {
-		notes = append(notes, fmt.Sprintf("关闭思考未生效：%d 条正常应答仍出现推理（渠道或模型不支持关闭）。这些样本照正常应答口径统计，其 TTFT 含思考耗时。", seen))
+	if pf == nil {
+		return nil
+	}
+	var notes []string
+	if pf.Adjustments != nil && len(*pf.Adjustments) > 0 {
+		notes = append(notes, "预检按上游报错自动调整了请求形态（全任务沿用）："+strings.Join(*pf.Adjustments, "；")+"。")
+	}
+	if !pf.Passed && pf.Detail != nil {
+		notes = append(notes, "预检请求始终没拿到正常响应（"+*pf.Detail+"），按配置的请求形态照跑；限流/5xx 本身就是稳定性结论的一部分。")
+	}
+	if pf.Passed && !pf.UsageReported {
+		notes = append(notes, "上游响应不带 usage：输入/输出偏差、缓存命中率与 TPM 实测 token 吞吐缺测（服务端能力，非配置问题）。")
+	}
+	if pf.NonStream != nil && *pf.NonStream {
+		notes = append(notes, "上游无视 stream=true、回整块 JSON：首增量/首字（TTFD/TTFT）测不到，只有首字节与总耗时；正文与 usage 照常统计。")
+	}
+	notes = append(notes, thinkingNotes(params, pf, seen)...)
+	if cal != nil && cal.Uncalibrated != nil && *cal.Uncalibrated {
+		why := ""
+		if cal.Reason != nil {
+			why = "（" + *cal.Reason + "）"
+		}
+		notes = append(notes, fmt.Sprintf("负载画像未定标%s：按名义 %.1f 字符/token 塑形照跑，实际输入 token 可能偏离目标。", why, cal.NominalRatio))
 	}
 	return notes
+}
+
+// thinkingNotes 思考控制的结论：采用了哪种写法、自动探测的结果、关不掉时的说明
+func thinkingNotes(params api.StabilityTaskParams, pf *api.StabilityPreflight, seen int) []string {
+	mode := api.StabilityThinkingDefault
+	if params.Workload != nil && params.Workload.Thinking != nil {
+		mode = *params.Workload.Thinking
+	}
+	if mode == api.StabilityThinkingDefault {
+		return nil
+	}
+	tried := 0
+	if pf.Trials != nil {
+		tried = len(*pf.Trials)
+	}
+	var notes []string
+	switch {
+	case pf.Thinking != nil && *pf.Thinking != "":
+		how := "按所选写法"
+		switch {
+		case mode == api.StabilityThinkingAuto:
+			how = fmt.Sprintf("自动探测（试了 %d 种写法）", tried)
+		case *pf.Thinking != string(mode):
+			how = fmt.Sprintf("所选写法被上游拒收，自动探测其余写法（试了 %d 种）后改", tried)
+		}
+		notes = append(notes, fmt.Sprintf("关闭思考：%s发 %s。", how, deref(pf.ThinkingField)))
+	case mode == api.StabilityThinkingAuto && !pf.Reasoning:
+		notes = append(notes, "关闭思考·自动探测：预检时模型没有思考，未发任何思考参数。")
+	case tried > 0:
+		lead := "关闭思考·自动探测"
+		if mode != api.StabilityThinkingAuto {
+			lead = "所选关思考写法被上游拒收，改为自动探测其余写法"
+		}
+		notes = append(notes, fmt.Sprintf("%s：%d 种写法都没关掉（逐项结果见预检），按渠道默认测——很可能该模型官方就不支持关闭思考（服务端能力，非配置问题），TTFT 含思考耗时；需要不思考的数据可换该厂商的非思考模型名。", lead, tried))
+	case pf.Reasoning:
+		notes = append(notes, "所选关思考写法被上游拒收，已按渠道默认（不发思考参数）测，TTFT 可能含思考耗时。")
+	default:
+		notes = append(notes, "所选关思考写法被上游拒收，已按渠道默认（不发思考参数）测；预检时模型没有思考，不影响 TTFT。")
+	}
+	if seen > 0 && pf.Thinking != nil && *pf.Thinking != "" {
+		notes = append(notes, fmt.Sprintf("关闭思考未完全生效：%d 条正常应答仍出现推理（可能该模型/渠道不支持关闭），照正常应答口径统计，其 TTFT 含思考耗时。", seen))
+	}
+	return notes
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 func (h *handlers) ListStabilityProbes(w http.ResponseWriter, r *http.Request) {
@@ -494,7 +576,7 @@ func (h *handlers) buildStabilityReport(w http.ResponseWriter, r *http.Request, 
 	if params.Protocol != nil {
 		proto = *params.Protocol
 	}
-	footnotes := append(slices.Clone(stabilityFootnotes), thinkingFootnotes(params, stages)...)
+	footnotes := append(slices.Clone(stabilityFootnotes), preflightFootnotes(params, stages)...)
 	report := api.StabilityReport{
 		TaskId:      task.ID,
 		Status:      api.TaskStatus(task.Status),
@@ -546,6 +628,13 @@ func resolveStabilityParams(in api.StabilityTaskParams) (stability.StabilityPara
 	}
 	if in.Workload != nil {
 		p.Workload = resolveWorkload(*in.Workload)
+	}
+	if in.Compat != nil {
+		c, err := resolveCompat(*in.Compat)
+		if err != nil {
+			return p, err.Error()
+		}
+		p.Compat = c
 	}
 	if in.RpmStartRate != nil {
 		p.RpmStartRate = float64(*in.RpmStartRate)
@@ -612,8 +701,36 @@ func resolveWorkload(in api.StabilityWorkload) stability.Workload {
 		w.CacheHitRate = math.Round(float64(*in.CacheHitRate)*10000) / 10000
 	}
 	w.Output = derefInt(in.Output)
-	w.DisableThinking = in.DisableThinking != nil && *in.DisableThinking
+	if in.Thinking != nil {
+		w.Thinking = string(*in.Thinking)
+	}
 	return w
+}
+
+// resolveCompat 兼容选项 api → 领域参数：自定义请求体字段的值转成 JSON 原文（不转义 <>&，原样发给上游）
+func resolveCompat(in api.StabilityCompat) (stability.Compat, error) {
+	var c stability.Compat
+	if in.MaxTokensField != nil {
+		c.MaxTokensField = string(*in.MaxTokensField)
+	}
+	if in.StreamUsage != nil {
+		c.StreamUsage = string(*in.StreamUsage)
+	}
+	c.ChatCacheControl = in.ChatCacheControl != nil && *in.ChatCacheControl
+	if in.ExtraBody != nil && len(*in.ExtraBody) > 0 {
+		c.ExtraBody = make(map[string]json.RawMessage, len(*in.ExtraBody))
+		for k, v := range *in.ExtraBody {
+			b, err := probe.MarshalNoEscape(v)
+			if err != nil {
+				return c, fmt.Errorf("自定义请求体字段 %q 无法序列化: %w", k, err)
+			}
+			c.ExtraBody[k] = b
+		}
+	}
+	if in.ExtraHeaders != nil && len(*in.ExtraHeaders) > 0 {
+		c.ExtraHeaders = *in.ExtraHeaders
+	}
+	return c, nil
 }
 
 // derefInt 可选整数：缺省 = 0（领域参数里 0 即「未设」）
@@ -730,6 +847,10 @@ func stabilitySampleToAPI(r db.ListStabilitySamplesRow) api.StabilitySample {
 	if r.TargetOutputTokens.Valid {
 		v := int(r.TargetOutputTokens.Int32)
 		s.TargetOutputTokens = &v
+	}
+	if r.ReasoningTokens.Valid {
+		v := int(r.ReasoningTokens.Int32)
+		s.ReasoningTokens = &v
 	}
 	return s
 }

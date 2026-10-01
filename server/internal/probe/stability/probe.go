@@ -74,7 +74,9 @@ type Sample struct {
 
 	InputTokens  int // <0 = 无 usage → NULL
 	OutputTokens int // <0 = 无 usage → NULL
-	CachedTokens int // 输入中命中缓存的 token；<0 = 无 usage → NULL
+	CachedTokens int // 输入中命中缓存的 token；<0 = 无 usage 或上游不报缓存字段 → NULL
+	// ReasoningTokens 输出中的推理 token（usage 明细）；<0 = 无 usage → NULL。隐藏推理的模型只有这一个信号
+	ReasoningTokens int
 
 	TargetInputTokens  int // 负载画像的输入 token 目标；0 = 不塑形 → NULL
 	TargetOutputTokens int // 输出 token 目标；0 = 无目标 → NULL
@@ -139,12 +141,15 @@ type Metrics struct {
 	// —— 负载画像（不塑形 / 无目标时留空）——
 	InputDeviation  *Deviation `json:"inputDeviation,omitempty"`  // 目标输入 vs 实测 prompt_tokens
 	OutputDeviation *Deviation `json:"outputDeviation,omitempty"` // 目标输出 vs 实测 completion
-	// CacheHitRate 实测命中率 Σcached/Σinput（仅 h>0 时算）；偏离目标 CacheExpected 超容差 → CacheMiss
+	// CacheHitRate 实测命中率 Σcached/Σinput（仅 h>0 时算，只取上游报了缓存字段的样本）；偏离目标 CacheExpected
+	// 超容差 → CacheMiss。上游压根不报缓存字段时为空（无从判断，不当未命中）
 	CacheHitRate  *float64 `json:"cacheHitRate,omitempty"`
 	CacheExpected float64  `json:"cacheExpected,omitempty"`
 	CacheMiss     bool     `json:"cacheMiss,omitempty"`
-	// ReasoningSeen 正常应答里出现推理的条数（首增量早于首正文，或输出上限被思考用完）：关思考没关掉的证据
+	// ReasoningSeen 正常应答里出现推理的条数（首增量早于首正文、usage 报了推理 token，或输出上限被思考用完）
 	ReasoningSeen int `json:"reasoningSeen,omitempty"`
+	// Preflight 预检结论（仅 __overall__）：上游实际接受的请求形态、做过的兼容调整、关思考探测结果
+	Preflight *Preflight `json:"preflight,omitempty"`
 	// Calibration 定标结果（仅 __overall__）
 	Calibration *Calibration `json:"calibration,omitempty"`
 

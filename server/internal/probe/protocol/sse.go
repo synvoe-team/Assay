@@ -3,6 +3,7 @@ package protocol
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -43,6 +44,41 @@ func scanSSE(r io.Reader, handle func(m map[string]any) error) (done bool, err e
 		}
 	}
 	return done, sc.Err()
+}
+
+// decodeObject 非流式整块响应 → JSON 对象
+func decodeObject(raw []byte) (map[string]any, error) {
+	doc, err := probe.DecodeUseNumber(raw)
+	if err != nil {
+		return nil, fmt.Errorf("响应体不是 JSON: %w", err)
+	}
+	m, ok := doc.(map[string]any)
+	if !ok {
+		return nil, errors.New("响应体不是 JSON 对象")
+	}
+	if err := errorField(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// errorField 响应对象里的 error 字段 → err：标准的 {"error":{"type"|"code","message"}}，
+// 也认不少网关回的 {"error":"…"} 纯字符串；没有或为空返回 nil
+func errorField(m map[string]any) error {
+	switch ev := m["error"].(type) {
+	case map[string]any:
+		kind, _ := strField(ev, "type")
+		if kind == "" {
+			kind, _ = strField(ev, "code")
+		}
+		msg, _ := strField(ev, "message")
+		return streamError(kind, msg)
+	case string:
+		if ev != "" {
+			return streamError("", ev)
+		}
+	}
+	return nil
 }
 
 // streamError 流内错误事件 → err，文案带错误类型（判 stream_anomaly 时保留，便于定位哪一层拒的）

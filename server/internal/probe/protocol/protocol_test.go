@@ -54,21 +54,6 @@ func TestLoadBodyGolden(t *testing.T) {
 			load: Load{Model: "c", Prompt: Prompt{Shared: "SSS", Unique: "U"}, MaxTokens: 8},
 			want: `{"model":"c","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":"SSS","cache_control":{"type":"ephemeral"}},{"type":"text","text":"U"}]}],"stream":true}`,
 		},
-		{
-			name: "chat 关思考", proto: ProtocolOpenAIChat,
-			load: Load{Model: "m", Prompt: Prompt{Unique: "q"}, MaxTokens: 8, DisableThinking: true},
-			want: `{"model":"m","messages":[{"role":"user","content":"q"}],"max_tokens":8,"stream":true,"stream_options":{"include_usage":true},"thinking":{"type":"disabled"}}`,
-		},
-		{
-			name: "responses 关思考", proto: ProtocolOpenAIResponses,
-			load: Load{Model: "m", Prompt: Prompt{Unique: "q"}, MaxTokens: 32, DisableThinking: true},
-			want: `{"model":"m","input":"q","max_output_tokens":32,"stream":true,"reasoning":{"effort":"none"}}`,
-		},
-		{
-			name: "anthropic 关思考", proto: ProtocolAnthropicMessages,
-			load: Load{Model: "c", Prompt: Prompt{Unique: "q"}, MaxTokens: 8, DisableThinking: true},
-			want: `{"model":"c","max_tokens":8,"messages":[{"role":"user","content":"q"}],"stream":true,"thinking":{"type":"disabled"}}`,
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

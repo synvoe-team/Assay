@@ -245,6 +245,7 @@ func sampleParams(taskID uuid.UUID, probeID string, s stability.Sample) db.Inser
 
 		TargetInputTokens:  int4Positive(s.TargetInputTokens), // 0（无目标）→ NULL
 		TargetOutputTokens: int4Positive(s.TargetOutputTokens),
+		ReasoningTokens:    int4OrNull(s.ReasoningTokens),
 	}
 }
 

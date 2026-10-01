@@ -176,6 +176,12 @@ func TestSpecOutputTarget(t *testing.T) {
 			t.Errorf("有输出目标时问题应为顶格数数 prompt")
 		}
 	}
+	// 预检读出模型上限 8192：目标随之钳住（偏差按实发上限算）
+	in.Params.Workload.Output = 16000
+	in.Plan.Shape.MaxTokensCap = 8192
+	if sp := in.spec("c1", 0, 1, ladderOutput); sp.MaxTokens != 8192 || sp.TargetOutput != 8192 {
+		t.Errorf("钳住后 spec = %+v，期望 max=目标=8192", sp)
+	}
 }
 
 // TestSpecShapedInput 输入塑形：唯一标记打头（破缓存）、问题在最后一句、总长 ≈ 目标×字符比
@@ -286,7 +292,7 @@ func newCacheMock(t *testing.T) (*httptest.Server, *cacheMock) {
 	return srv, m
 }
 
-// TestPrepareWorkload 定标 + 写缓存：1 条定标测出字符/token 比，h>0 再串行 2 条写缓存，均记 warmup 样本
+// TestPrepareWorkload 预检 + 定标 + 写缓存：1 条预检定形态、1 条定标测出字符/token 比，h>0 再串行 2 条写缓存，均记 warmup 样本
 func TestPrepareWorkload(t *testing.T) {
 	srv, mock := newCacheMock(t)
 	params := StabilityParams{
@@ -320,29 +326,30 @@ func TestPrepareWorkload(t *testing.T) {
 	if c.CacheWarmCached == nil || *c.CacheWarmCached < 1900 {
 		t.Errorf("写缓存第 2 条 cached = %v，期望 ≈2000", c.CacheWarmCached)
 	}
-	if len(mock.prompts) != 1+cacheWarmupRequests {
-		t.Fatalf("上游收到 %d 条，期望 1 定标 + %d 写缓存", len(mock.prompts), cacheWarmupRequests)
+	const want = 2 + cacheWarmupRequests // 预检 + 定标 + 写缓存
+	if len(mock.prompts) != want {
+		t.Fatalf("上游收到 %d 条，期望 1 预检 + 1 定标 + %d 写缓存", len(mock.prompts), cacheWarmupRequests)
 	}
-	if len(*samples) != 1+cacheWarmupRequests {
-		t.Fatalf("样本 %d 条，期望 %d", len(*samples), 1+cacheWarmupRequests)
+	if len(*samples) != want {
+		t.Fatalf("样本 %d 条，期望 %d", len(*samples), want)
 	}
 	for _, s := range *samples {
 		if !s.Warmup {
-			t.Errorf("定标/写缓存样本 %s#%d 必须标 warmup", s.Stage, s.Seq)
+			t.Errorf("准备期样本 %s#%d 必须标 warmup", s.Stage, s.Seq)
 		}
 	}
-	if (*samples)[0].Stage != stageCalib || (*samples)[1].Stage != stageCacheWrite {
-		t.Errorf("样本档位 = %s/%s", (*samples)[0].Stage, (*samples)[1].Stage)
+	if (*samples)[0].Stage != stagePreflight || (*samples)[1].Stage != stageCalib || (*samples)[2].Stage != stageCacheWrite {
+		t.Errorf("样本档位 = %s/%s/%s", (*samples)[0].Stage, (*samples)[1].Stage, (*samples)[2].Stage)
 	}
-	if *progressMax != 1+cacheWarmupRequests {
-		t.Errorf("进度 = %d，期望 %d", *progressMax, 1+cacheWarmupRequests)
+	if *progressMax != want || EstPrepRequests(params) != want {
+		t.Errorf("进度 = %d、EstPrepRequests = %d，期望 %d", *progressMax, EstPrepRequests(params), want)
 	}
-	if EstPrepRequests(params) != 1+cacheWarmupRequests {
-		t.Errorf("EstPrepRequests = %d", EstPrepRequests(params))
+	if plan.Preflight == nil || !plan.Preflight.Passed || !plan.Preflight.UsageReported {
+		t.Errorf("预检结论 = %+v，期望通过且带 usage", plan.Preflight)
 	}
 }
 
-// TestPrepareWorkloadNone 不塑形：不发任何请求，零值 Plan
+// TestPrepareWorkloadNone 不塑形：只发 1 条预检，不定标、形态为默认（零值）
 func TestPrepareWorkloadNone(t *testing.T) {
 	srv, mock := newCacheMock(t)
 	var params StabilityParams
@@ -350,15 +357,18 @@ func TestPrepareWorkloadNone(t *testing.T) {
 	params.ApplyDefaults()
 	in, _, _, _ := ladderInput(t, srv.URL, params, nil)
 	plan, err := PrepareWorkload(context.Background(), in)
-	if err != nil || plan.Calibration != nil || plan.Ratio != 0 {
-		t.Fatalf("plan=%+v err=%v，期望零值", plan, err)
+	if err != nil || plan.Calibration != nil || plan.Ratio != 0 || plan.Preflight == nil {
+		t.Fatalf("plan=%+v err=%v，期望只有预检结论", plan, err)
 	}
-	if len(mock.prompts) != 0 || EstPrepRequests(params) != 0 {
-		t.Errorf("不塑形时不应发定标请求（实发 %d）", len(mock.prompts))
+	if len(mock.prompts) != 1 || EstPrepRequests(params) != 1 {
+		t.Errorf("不塑形时只应发 1 条预检（实发 %d、预估 %d）", len(mock.prompts), EstPrepRequests(params))
+	}
+	if plan.Shape.Thinking != "" || plan.Shape.MaxCompletionTokens || plan.Shape.NoStreamUsage {
+		t.Errorf("默认形态应为零值：%+v", plan.Shape)
 	}
 }
 
-// TestPrepareWorkloadNoUsage 渠道不回 usage 无法定标：fail-fast 报清原因，不带着错误比例跑完整个任务
+// TestPrepareWorkloadNoUsage 渠道不回 usage 测不了比例：不中止，按名义比塑形照跑，报告标「未定标」写明原因
 func TestPrepareWorkloadNoUsage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -369,9 +379,16 @@ func TestPrepareWorkloadNoUsage(t *testing.T) {
 	params := StabilityParams{Protocol: protocol.ProtocolOpenAIChat, Workload: Workload{Input: InputSpec{Mode: InputFixed, Value: 2000}}}
 	params.ApplyDefaults()
 	in, _, _, _ := ladderInput(t, srv.URL, params, nil)
-	_, err := PrepareWorkload(context.Background(), in)
-	if err == nil || !strings.Contains(err.Error(), "usage") {
-		t.Fatalf("err = %v，期望说明缺 usage", err)
+	plan, err := PrepareWorkload(context.Background(), in)
+	if err != nil {
+		t.Fatalf("缺 usage 应降级照跑，却返回 err = %v", err)
+	}
+	c := plan.Calibration
+	if c == nil || !c.Uncalibrated || !strings.Contains(c.Reason, "usage") || plan.Ratio != nominalCharsPerToken {
+		t.Fatalf("定标 = %+v ratio=%v，期望未定标、按名义比 %v、原因提到 usage", c, plan.Ratio, nominalCharsPerToken)
+	}
+	if plan.Preflight == nil || plan.Preflight.UsageReported {
+		t.Errorf("预检应记下上游不报 usage：%+v", plan.Preflight)
 	}
 }
 

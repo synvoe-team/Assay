@@ -1,6 +1,7 @@
 package stability
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -30,6 +31,8 @@ type outcome struct {
 	HasBody bool // 拿到 200 并读过响应体（TTFB/Total 有意义）
 
 	Usage     protocol.Usage
+	Reasoned  bool        // 出现过推理（推理增量 / 正文开头的 <think> 段 / usage 报了推理 token）
+	NonStream bool        // 上游无视 stream=true 回了整块 JSON：正文与 usage 照取，首增量/首字测不到
 	HTTPProto string      // 实际协商的协议版本（resp.Proto，如 HTTP/1.1）
 	Header    http.Header // 所有响应都留存，供 RPM probe 读限速头（2xx 也带余量头）
 }
@@ -71,6 +74,7 @@ func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, b
 	}
 	req.Header.Set("Content-Type", "application/json")
 	codec.Auth(req, apiKey)
+	load.Shape.ApplyHeaders(req, apiKey)
 
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -100,22 +104,32 @@ func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, b
 	}
 
 	tr := &timingReader{r: resp.Body, start: start}
-	res, err := codec.ScanStream(tr, protocol.Hooks{
-		OnFirstDelta: func() {
-			o.TTFD = time.Since(start)
-			o.HasTTFD = true
-		},
-		OnFirstContent: func() {
-			o.TTFT = time.Since(start)
-			o.HasTTFT = true
-		},
-	})
+	br := bufio.NewReaderSize(tr, 64*1024)
+	var res protocol.Result
+	if o.NonStream = jsonBody(br); o.NonStream {
+		raw, rerr := io.ReadAll(io.LimitReader(br, maxJSONBody))
+		if err = rerr; err == nil {
+			res, err = codec.ParseBody(raw)
+		}
+	} else {
+		res, err = codec.ScanStream(br, protocol.Hooks{
+			OnFirstDelta: func() {
+				o.TTFD = time.Since(start)
+				o.HasTTFD = true
+			},
+			OnFirstContent: func() {
+				o.TTFT = time.Since(start)
+				o.HasTTFT = true
+			},
+		})
+	}
 	o.Total = time.Since(start)
 	o.HasBody = true
 	if tr.got {
 		o.TTFB = tr.ttfb
 	}
 	o.Usage = res.Usage
+	o.Reasoned = res.SawReasoning || res.Usage.Reasoning > 0
 	if err != nil {
 		o.ErrorClass = ErrStreamAnomaly
 		o.Error = "读取响应流失败: " + truncateOneLine(err.Error())
@@ -124,6 +138,26 @@ func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, b
 	o.ErrorClass, o.Error = classifyStream(res, load.MaxTokens)
 	o.Ok = o.ErrorClass == ""
 	return o
+}
+
+// maxJSONBody 非流式整块响应的读取上限
+const maxJSONBody = 16 << 20
+
+// jsonBody 上游是否无视 stream=true 回了整块 JSON：跳过前导空白（DeepSeek 排队时先发空行保活）后
+// 首字节是 '{' 即是；SSE 以 data:/event:/: 注释开头。按内容判断而非 Content-Type（不少中转乱标）。
+func jsonBody(br *bufio.Reader) bool {
+	for {
+		b, err := br.Peek(1)
+		if err != nil || len(b) == 0 {
+			return false
+		}
+		switch b[0] {
+		case ' ', '\t', '\r', '\n':
+			_, _ = br.Discard(1)
+		default:
+			return b[0] == '{'
+		}
+	}
 }
 
 // classifyStream HTTP 200 且流扫描无错之后的判定，返回空分类 = 成功。顺序即优先级：
@@ -183,6 +217,8 @@ func sampleFrom(sp reqSpec, stageIndex int, warmup bool, dispatchedAt time.Time,
 		OutputTokens: -1,
 		CachedTokens: -1,
 
+		ReasoningTokens: -1,
+
 		TargetInputTokens:  sp.TargetInput,
 		TargetOutputTokens: sp.TargetOutput,
 	}
@@ -199,7 +235,10 @@ func sampleFrom(sp reqSpec, stageIndex int, warmup bool, dispatchedAt time.Time,
 	if o.Usage.Ok {
 		s.InputTokens = int(o.Usage.Prompt)
 		s.OutputTokens = int(o.Usage.Completion)
-		s.CachedTokens = int(o.Usage.Cached)
+		s.ReasoningTokens = int(o.Usage.Reasoning)
+		if o.Usage.CachedOk {
+			s.CachedTokens = int(o.Usage.Cached)
+		}
 	}
 	return s
 }

@@ -99,6 +99,7 @@ type StabilitySample struct {
 	Warmup             bool
 	TargetInputTokens  pgtype.Int4
 	TargetOutputTokens pgtype.Int4
+	ReasoningTokens    pgtype.Int4
 }
 
 type Task struct {

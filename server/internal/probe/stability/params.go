@@ -13,8 +13,10 @@ type StabilityParams struct {
 	// Protocol 本任务实选协议（三协议择一），写进快照
 	Protocol string `json:"protocol"`
 
-	// Workload 负载画像：每条请求的输入 token / 缓存命中率 / 输出 token，三个 probe 共用
+	// Workload 负载画像：每条请求的输入 token / 缓存命中率 / 输出 token / 思考控制，三个 probe 共用
 	Workload Workload `json:"workload"`
+	// Compat 请求兼容选项：默认全自动（预检按上游实际反应调整），也可手动指定或追加自定义字段/请求头
+	Compat Compat `json:"compat"`
 
 	// —— 阶梯并发（闭环，测延迟曲线）——
 	ConcurrencyLadder []int `json:"concurrencyLadder"` // 各并发档，默认 [1,2,4,8,16]
@@ -88,6 +90,10 @@ func (p *StabilityParams) ApplyDefaults() {
 	if p.Workload.Input.Mode == "" {
 		p.Workload.Input.Mode = InputNone
 	}
+	if p.Workload.Thinking == "" {
+		p.Workload.Thinking = ThinkingDefault
+	}
+	p.Compat.applyDefaults()
 	if p.RpmStartRate == 0 {
 		p.RpmStartRate = DefaultRpmStartRate
 	}
@@ -204,6 +210,12 @@ func (p StabilityParams) Validate() error {
 	}
 	if p.RequestTimeoutMs < 1000 || p.RequestTimeoutMs > 600000 {
 		return errors.New("单请求超时需 1000-600000ms")
+	}
+	if err := validateThinking(p.Workload.Thinking, p.Protocol); err != nil {
+		return err
+	}
+	if err := p.Compat.validate(); err != nil {
+		return err
 	}
 	return p.validateWorkload()
 }
