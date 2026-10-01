@@ -11,7 +11,7 @@ import (
 )
 
 // tpmInput 组装跑 tpm_probe 的 RunInput，并收集各档 StageMetrics。
-// 令 TpmMaxTokensPerReq=76 → 每请求 token 权重 weight=24+76=100，token 速率 ÷100 即请求速率，
+// 令负载画像输入固定 24 + 输出 76 → 每请求 token 权重 weight=100，token 速率 ÷100 即请求速率，
 // 从而复用 RPM 测试同一套令牌桶上游（按请求限速）与相同的请求速率行为。
 func tpmInput(t *testing.T, baseURL string, tune func(*StabilityParams)) (RunInput, *[]StageMetrics) {
 	t.Helper()
@@ -26,6 +26,7 @@ func tpmInput(t *testing.T, baseURL string, tune func(*StabilityParams)) (RunInp
 	var mu sync.Mutex
 	in := RunInput{
 		Probe:  tpmProbeID,
+		Plan:   buildPlan(params.Workload, "", nominalCharsPerToken),
 		Target: probe.Target{BaseURL: baseURL, Model: "m"},
 		Params: params,
 		Client: &http.Client{},
@@ -46,9 +47,9 @@ func tpmInput(t *testing.T, baseURL string, tune func(*StabilityParams)) (RunInp
 func TestTpm_ConvergesToBoundary(t *testing.T) {
 	srv := tokenBucketServer(t, 15)
 	in, metrics := tpmInput(t, srv.URL, func(p *StabilityParams) {
-		p.TpmMaxTokensPerReq = 76 // weight = 24 + 76 = 100
-		p.TpmStartRate = 500      // 5 req/s
-		p.TpmMaxRate = 4000       // 40 req/s
+		setTpmWeight100(p)
+		p.TpmStartRate = 500 // 5 req/s
+		p.TpmMaxRate = 4000  // 40 req/s
 		p.TpmStageSec = 1
 		p.TpmBinarySteps = 4
 		p.TpmMaxInFlight = 256
@@ -92,9 +93,9 @@ func TestTpm_ConvergesToBoundary(t *testing.T) {
 func TestTpm_ReachedCap(t *testing.T) {
 	srv, _ := sseChatServer(t, 0, nil) // 永不 429
 	in, metrics := tpmInput(t, srv.URL, func(p *StabilityParams) {
-		p.TpmMaxTokensPerReq = 76 // weight = 100
-		p.TpmStartRate = 400      // 4 req/s
-		p.TpmMaxRate = 1600       // 16 req/s
+		setTpmWeight100(p)
+		p.TpmStartRate = 400 // 4 req/s
+		p.TpmMaxRate = 1600  // 16 req/s
 		p.TpmStageSec = 1
 		p.TpmBinarySteps = 4
 		p.TpmMaxInFlight = 256
@@ -131,7 +132,7 @@ func TestTpm_ReachedCap(t *testing.T) {
 func TestEstTpmRequests(t *testing.T) {
 	var p StabilityParams
 	p.ApplyDefaults()
-	p.TpmMaxTokensPerReq = 76 // weight = 100
+	setTpmWeight100(&p)
 	p.TpmStartRate = 200
 	p.TpmMaxRate = 800
 	p.TpmStageSec = 10
@@ -159,4 +160,10 @@ func TestSumTokens(t *testing.T) {
 	if got := sumTokens(nil); got != 0 {
 		t.Fatalf("空样本 sumTokens 应为 0，得 %d", got)
 	}
+}
+
+// setTpmWeight100 输入固定 24 + 输出 76：每请求 token 权重恰为 100
+func setTpmWeight100(p *StabilityParams) {
+	p.Workload.Input = InputSpec{Mode: InputFixed, Value: 24}
+	p.Workload.Output = 76
 }

@@ -77,20 +77,45 @@ type Codec interface {
 	Path() string
 	// Auth 按协议标准写认证头（Bearer / x-api-key + anthropic-version）
 	Auth(req *http.Request, apiKey string)
-	// LoadBody 构造最小压测请求体：content 顶格 prompt，maxTokens 砝码，
-	// stream 恒 true（TTFT 需流式逐帧）。返回裸字节直接发送，绝不二次序列化。
-	LoadBody(model, content string, maxTokens int) ([]byte, error)
+	// LoadBody 构造压测请求体：stream 恒 true（TTFT 需流式逐帧）；共享前缀按协议的缓存机制摆放，
+	// DisableThinking 按协议官方参数关思考。返回裸字节直接发送，绝不二次序列化。
+	LoadBody(l Load) ([]byte, error)
 	// ScanStream 扫描 SSE 流：首个非空增量 / 首个非空正文增量到达时分别回调 h 的两个钩子，
 	// 并给出 usage、是否见到结束帧、是否因生成上限结束、是否出现推理/正文增量。
 	// 分片解析失败或流内错误事件（上游在 200 之后于流里报错）返回 err（判 stream_anomaly）。
 	ScanStream(r io.Reader, h Hooks) (Result, error)
 }
 
-// message OpenAI chat 与 Anthropic messages 共用的消息体（role + 纯文本 content）
+// Prompt 压测 prompt 的结构化形态。Shared 为任务内所有请求字节相同的共享前缀（缓存命中段，可空），
+// Unique 为每请求唯一段（唯一标记 + 填充 + 问题）。Shared 为空时与旧的单串 prompt 逐字节一致。
+type Prompt struct {
+	Shared string
+	Unique string
+}
+
+// Text 拼成单串：自动前缀缓存的协议（openai_chat / openai_responses）共享前缀直接拼在最前面
+func (p Prompt) Text() string { return p.Shared + p.Unique }
+
+// Load 一次压测请求的构造参数
+type Load struct {
+	Model           string
+	Prompt          Prompt
+	MaxTokens       int  // 生成上限
+	DisableThinking bool // 按协议官方参数请求关闭思考
+}
+
+// message OpenAI chat 消息体（role + 纯文本 content）
 type message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
+
+// thinkingConfig chat（DeepSeek/GLM/Kimi/豆包通行的厂商扩展）与 Anthropic 官方共用的关思考参数
+type thinkingConfig struct {
+	Type string `json:"type"`
+}
+
+var thinkingDisabled = &thinkingConfig{Type: "disabled"}
 
 // codecs 协议注册表，由各实现的 init() 填充
 var codecs = map[string]Codec{}

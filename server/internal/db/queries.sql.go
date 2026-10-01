@@ -848,31 +848,33 @@ const insertStabilitySample = `-- name: InsertStabilitySample :exec
 insert into stability_samples
     (task_id, probe, stage, stage_index, seq, protocol, dispatched_at,
      ttfb_ms, ttfd_ms, ttft_ms, total_ms, ok, http_status, http_proto, error_class, error,
-     input_tokens, output_tokens, cached_tokens, warmup)
-values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+     input_tokens, output_tokens, cached_tokens, warmup, target_input_tokens, target_output_tokens)
+values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 `
 
 type InsertStabilitySampleParams struct {
-	TaskID       uuid.UUID
-	Probe        string
-	Stage        string
-	StageIndex   int32
-	Seq          int32
-	Protocol     string
-	DispatchedAt time.Time
-	TtfbMs       pgtype.Int4
-	TtfdMs       pgtype.Int4
-	TtftMs       pgtype.Int4
-	TotalMs      pgtype.Int4
-	Ok           bool
-	HttpStatus   pgtype.Int4
-	HttpProto    *string
-	ErrorClass   *string
-	Error        *string
-	InputTokens  pgtype.Int4
-	OutputTokens pgtype.Int4
-	CachedTokens pgtype.Int4
-	Warmup       bool
+	TaskID             uuid.UUID
+	Probe              string
+	Stage              string
+	StageIndex         int32
+	Seq                int32
+	Protocol           string
+	DispatchedAt       time.Time
+	TtfbMs             pgtype.Int4
+	TtfdMs             pgtype.Int4
+	TtftMs             pgtype.Int4
+	TotalMs            pgtype.Int4
+	Ok                 bool
+	HttpStatus         pgtype.Int4
+	HttpProto          *string
+	ErrorClass         *string
+	Error              *string
+	InputTokens        pgtype.Int4
+	OutputTokens       pgtype.Int4
+	CachedTokens       pgtype.Int4
+	Warmup             bool
+	TargetInputTokens  pgtype.Int4
+	TargetOutputTokens pgtype.Int4
 }
 
 func (q *Queries) InsertStabilitySample(ctx context.Context, arg InsertStabilitySampleParams) error {
@@ -897,6 +899,8 @@ func (q *Queries) InsertStabilitySample(ctx context.Context, arg InsertStability
 		arg.OutputTokens,
 		arg.CachedTokens,
 		arg.Warmup,
+		arg.TargetInputTokens,
+		arg.TargetOutputTokens,
 	)
 	return err
 }
@@ -1253,32 +1257,34 @@ func (q *Queries) ListStabilityMetrics(ctx context.Context, taskID uuid.UUID) ([
 const listStabilitySamples = `-- name: ListStabilitySamples :many
 select probe, stage, stage_index, seq, protocol, dispatched_at,
        ttfb_ms, ttfd_ms, ttft_ms, total_ms, ok, http_status, http_proto, error_class, error,
-       input_tokens, output_tokens, cached_tokens, warmup
+       input_tokens, output_tokens, cached_tokens, warmup, target_input_tokens, target_output_tokens
 from stability_samples
 where task_id = $1
 order by probe, stage_index, seq
 `
 
 type ListStabilitySamplesRow struct {
-	Probe        string
-	Stage        string
-	StageIndex   int32
-	Seq          int32
-	Protocol     string
-	DispatchedAt time.Time
-	TtfbMs       pgtype.Int4
-	TtfdMs       pgtype.Int4
-	TtftMs       pgtype.Int4
-	TotalMs      pgtype.Int4
-	Ok           bool
-	HttpStatus   pgtype.Int4
-	HttpProto    *string
-	ErrorClass   *string
-	Error        *string
-	InputTokens  pgtype.Int4
-	OutputTokens pgtype.Int4
-	CachedTokens pgtype.Int4
-	Warmup       bool
+	Probe              string
+	Stage              string
+	StageIndex         int32
+	Seq                int32
+	Protocol           string
+	DispatchedAt       time.Time
+	TtfbMs             pgtype.Int4
+	TtfdMs             pgtype.Int4
+	TtftMs             pgtype.Int4
+	TotalMs            pgtype.Int4
+	Ok                 bool
+	HttpStatus         pgtype.Int4
+	HttpProto          *string
+	ErrorClass         *string
+	Error              *string
+	InputTokens        pgtype.Int4
+	OutputTokens       pgtype.Int4
+	CachedTokens       pgtype.Int4
+	Warmup             bool
+	TargetInputTokens  pgtype.Int4
+	TargetOutputTokens pgtype.Int4
 }
 
 // 导出证据链：全量逐请求时序
@@ -1311,6 +1317,8 @@ func (q *Queries) ListStabilitySamples(ctx context.Context, taskID uuid.UUID) ([
 			&i.OutputTokens,
 			&i.CachedTokens,
 			&i.Warmup,
+			&i.TargetInputTokens,
+			&i.TargetOutputTokens,
 		); err != nil {
 			return nil, err
 		}

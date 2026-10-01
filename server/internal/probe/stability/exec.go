@@ -53,9 +53,9 @@ func (t *timingReader) Read(p []byte) (int, error) {
 
 // doRequest 发一次最小压测请求并观测时序 + usage。
 // TTFB 由 timingReader 打点、TTFD/TTFT 由 codec 的两个钩子打点、total 为整流耗时。
-func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, baseURL, apiKey, model, content string, maxTokens, timeoutMs int) outcome {
+func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, baseURL, apiKey string, load protocol.Load, timeoutMs int) outcome {
 	var o outcome
-	body, err := codec.LoadBody(model, content, maxTokens)
+	body, err := codec.LoadBody(load)
 	if err != nil {
 		o.ErrorClass = ErrTransport
 		o.Error = "构造请求失败: " + err.Error()
@@ -121,7 +121,7 @@ func doRequest(ctx context.Context, client *http.Client, codec protocol.Codec, b
 		o.Error = "读取响应流失败: " + truncateOneLine(err.Error())
 		return o
 	}
-	o.ErrorClass, o.Error = classifyStream(res, maxTokens)
+	o.ErrorClass, o.Error = classifyStream(res, load.MaxTokens)
 	o.Ok = o.ErrorClass == ""
 	return o
 }
@@ -162,11 +162,11 @@ func classifyHTTP(status int) string {
 // sampleFrom outcome → Sample：测到什么记什么，没测到的取负值（落库转 NULL）。
 // 失败但拿到 200 的样本（预算耗尽/只有推理/断流）也保留时序与计量，作证据链；
 // 评估期的延迟分位与吞吐只取成功样本，不受影响。
-func sampleFrom(stage string, stageIndex, seq int, warmup bool, dispatchedAt time.Time, proto string, o outcome) Sample {
+func sampleFrom(sp reqSpec, stageIndex int, warmup bool, dispatchedAt time.Time, proto string, o outcome) Sample {
 	s := Sample{
-		Stage:        stage,
+		Stage:        sp.Stage,
 		StageIndex:   stageIndex,
-		Seq:          seq,
+		Seq:          sp.Seq,
 		Protocol:     proto,
 		DispatchedAt: dispatchedAt,
 		Warmup:       warmup,
@@ -182,6 +182,9 @@ func sampleFrom(stage string, stageIndex, seq int, warmup bool, dispatchedAt tim
 		InputTokens:  -1,
 		OutputTokens: -1,
 		CachedTokens: -1,
+
+		TargetInputTokens:  sp.TargetInput,
+		TargetOutputTokens: sp.TargetOutput,
 	}
 	if o.HasBody {
 		s.TTFBms = int(o.TTFB.Milliseconds())
@@ -201,8 +204,9 @@ func sampleFrom(stage string, stageIndex, seq int, warmup bool, dispatchedAt tim
 	return s
 }
 
-// uniquePrompt 给压测 prompt 拼唯一前缀「[nonce 档位-序号] 」。前缀放最前面：
-// 前缀缓存按开头匹配，开头不同才破得掉；档位标签各 probe 互异（c/r/t 开头），任务内必唯一。
+// uniquePrompt 给压测 prompt 拼唯一标记「[nonce 档位-序号] 」。标记放在唯一段最前面：
+// 前缀缓存按开头匹配，开头不同才破得掉（h>0 时紧跟共享前缀之后，缓存恰好止于共享前缀）；
+// 档位标签各 probe 互异（c/r/t 开头），任务内必唯一。
 func uniquePrompt(nonce, stage string, seq int, base string) string {
 	return fmt.Sprintf("[%s %s-%d] %s", nonce, stage, seq, base)
 }

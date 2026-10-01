@@ -121,21 +121,19 @@ func (w *StabilityWorker) work(ctx context.Context, taskID uuid.UUID) error {
 	// 全局成本硬闸跨所有 probe 共享：任一 probe 打满总请求/总 token/整任务时长上限即收敛。
 	caps := stability.NewCapGuard(params.MaxTotalRequests, params.MaxTotalTokens, time.Duration(params.MaxDurationSec)*time.Second)
 
-	// 按注册顺序执行各检测项，offset 把各 probe 的局部进度串成全局进度
+	// offset 把准备期与各 probe 的局部进度串成全局进度
 	offset := 0
-	for _, id := range task.Probes {
-		p, ok := stabreg.Get(id)
-		if !ok {
-			return fmt.Errorf("未知检测项 %q", id)
-		}
+	// input 组装一段执行的 RunInput：样本/指标挂在 id 名下，进度从当前 offset 接着计、实发数回写 *done。
+	// Progress 在各 probe 的锁内串行回调、各段之间顺序执行，*done 无需再加锁
+	input := func(id string, plan stability.Plan, done *int) stability.RunInput {
 		curOffset := offset
-		probeDone := 0 // Progress 在各 probe 的锁内串行回调、probe 之间顺序执行，无需再加锁
-		in := stability.RunInput{
+		return stability.RunInput{
 			Probe:  id,
 			Target: target,
 			APIKey: secret.ApiKey,
 			Nonce:  taskID.String()[:8],
 			Params: params,
+			Plan:   plan,
 			Client: w.client,
 			Codec:  codec,
 			Caps:   caps,
@@ -155,9 +153,9 @@ func (w *StabilityWorker) work(ctx context.Context, taskID uuid.UUID) error {
 					Metrics:    blob,
 				})
 			},
-			Progress: func(ctx context.Context, done, _ int) {
-				probeDone = done
-				global := curOffset + done
+			Progress: func(ctx context.Context, n, _ int) {
+				*done = n
+				global := curOffset + n
 				if err := w.q.UpdateTaskProgress(ctx, db.UpdateTaskProgressParams{
 					ID: taskID, ProgressTotal: task.ProgressTotal, ProgressDone: int32(global),
 				}); err != nil {
@@ -167,7 +165,24 @@ func (w *StabilityWorker) work(ctx context.Context, taskID uuid.UUID) error {
 				NotifyEvent(ctx, w.pool, w.log, Event{TaskID: taskID, Status: "running", Done: global, Total: total})
 			},
 		}
-		if err := p.Run(ctx, in); err != nil {
+	}
+
+	// 准备期：输入塑形时发定标请求测字符/token 比，h>0 再写缓存；样本挂伪检测项 workload（不出指标）
+	prepDone := 0
+	plan, err := stability.PrepareWorkload(ctx, input(stability.WorkloadProbeID, stability.Plan{}, &prepDone))
+	if err != nil {
+		return fmt.Errorf("负载画像准备: %w", err)
+	}
+	offset += prepDone
+
+	// 按注册顺序执行各检测项
+	for _, id := range task.Probes {
+		p, ok := stabreg.Get(id)
+		if !ok {
+			return fmt.Errorf("未知检测项 %q", id)
+		}
+		probeDone := 0
+		if err := p.Run(ctx, input(id, plan, &probeDone)); err != nil {
 			return fmt.Errorf("检测项 %s: %w", id, err)
 		}
 		// 下一项从实发请求数接着计：probe 提前收敛（未探到限速、碰硬闸）时实发远少于预估，
@@ -227,6 +242,9 @@ func sampleParams(taskID uuid.UUID, probeID string, s stability.Sample) db.Inser
 		OutputTokens: int4OrNull(s.OutputTokens),
 		CachedTokens: int4OrNull(s.CachedTokens),
 		Warmup:       s.Warmup,
+
+		TargetInputTokens:  int4Positive(s.TargetInputTokens), // 0（无目标）→ NULL
+		TargetOutputTokens: int4Positive(s.TargetOutputTokens),
 	}
 }
 

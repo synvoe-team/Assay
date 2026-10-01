@@ -2,6 +2,7 @@ package stability
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -12,8 +13,7 @@ import (
 // pacedStageConfig 一档开环发压的配置。
 type pacedStageConfig struct {
 	TargetRate float64       // 目标到达率 req/s
-	MaxTokens  int           // 每请求生成上限
-	Prompt     string        // 压测 prompt
+	Output     outputDefault // 该 probe 未设输出目标时的生成口径
 	Duration   time.Duration // 发压时长（排定新请求的窗口，尾部请求可越窗跑完）
 	// Warmup 档前段热身时长：排定时刻落在其内的样本标 warmup，不参与限速判定与指标。
 	// 渠道限流器有记忆（上一档没清零的计数、令牌桶攒下的突发额度），前段的表现不代表稳态。
@@ -60,6 +60,9 @@ func runPacedStage(ctx context.Context, in RunInput, stageIndex int, stage strin
 		dur = time.Second
 	}
 
+	// 本档排定的请求数（递增输入按它从 min 涨到 max）：⌈rate×时长⌉ + tick0
+	planned := int(math.Ceil(rate*dur.Seconds())) + 1
+
 	inflight := make(chan struct{}, maxInFlight)
 	var wg sync.WaitGroup
 	var mu sync.Mutex // 护 samples / firstErr / lastHeaders（跨 goroutine）
@@ -74,36 +77,34 @@ func runPacedStage(ctx context.Context, in RunInput, stageIndex int, stage strin
 
 	stageStart := time.Now()
 
-	// launch 排定一次发起：先抢在途槽（满则跳过、不耗预算），再过全局硬闸，最后起 goroutine。
+	// launch 排定一次发起：先抢在途槽（满则跳过、不耗预算），再过全局硬闸（按名义 token 预扣），最后起 goroutine。
 	// scheduledAt 为「排定时刻」，写入 dispatched_at。返回 false = 撞硬闸，应停止本档。
+	// prompt 在请求 goroutine 里拼：大输入的填充文本拼装不拖慢排期。
 	launch := func(scheduledAt time.Time) bool {
 		select {
 		case inflight <- struct{}{}:
 		default:
 			return true // 在途满：跳过本 tick，继续排期
 		}
-		if !in.Caps.Reserve() {
+		sp := in.spec(stage, seq, planned, cfg.Output)
+		est := in.nominal(sp)
+		if !in.Caps.Reserve(est) {
 			<-inflight // 释放刚占的在途槽
 			stopped = true
 			return false
 		}
-		sq := seq
 		seq++
 		dispatched++
 		wg.Add(1)
-		go func(sched time.Time, sqN int) {
+		go func(sched time.Time) {
 			defer wg.Done()
 			defer func() { <-inflight }()
-			o := doRequest(ctx, in.Client, in.Codec, in.Target.BaseURL, in.APIKey,
-				in.Target.Model, uniquePrompt(in.Nonce, stage, sqN, cfg.Prompt), cfg.MaxTokens, in.Params.RequestTimeoutMs)
+			o := in.exec(ctx, sp, in.prompt(sp), est)
 			if ctx.Err() != nil {
 				return // 取消/关停：不落污染样本
 			}
-			if in.Caps != nil && o.Usage.Ok {
-				in.Caps.AddTokens(o.Usage.Prompt + o.Usage.Completion)
-			}
 			warmup := sched.Sub(stageStart) < cfg.Warmup
-			s := sampleFrom(stage, stageIndex, sqN, warmup, sched, in.Codec.ID(), o)
+			s := sampleFrom(sp, stageIndex, warmup, sched, in.Codec.ID(), o)
 			hdrs := extractRateLimitHeaders(o.Header)
 
 			mu.Lock()
@@ -123,7 +124,7 @@ func runPacedStage(ctx context.Context, in RunInput, stageIndex int, stage strin
 			if serr == nil && afterEach != nil {
 				afterEach()
 			}
-		}(scheduledAt, sq)
+		}(scheduledAt)
 		return true
 	}
 

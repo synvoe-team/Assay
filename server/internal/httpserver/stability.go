@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"time"
@@ -28,15 +29,36 @@ const taskKindStability = "stability"
 var stabilityFootnotes = []string{
 	"TTFB=响应体首个非空字节到达耗时；TTFD=首个非空增量（推理或正文）到达耗时；TTFT=首个非空正文增量到达耗时；均以平台发出请求为唯一测量原点。",
 	"请求固定走 HTTP/1.1、多连接（对齐官方 SDK 默认行为），每条样本记录实际协商的协议版本。",
-	"每条 prompt 带任务内唯一前缀，破渠道整条响应缓存；输入命中缓存（cached_tokens>0）的成功样本不计入延迟分位。",
+	"每条 prompt 带任务内唯一标记，破渠道整条响应缓存；未设目标缓存命中率时，输入命中缓存（cached_tokens>0）的正常应答样本不计入延迟分位。",
 	"成功 = HTTP 200 + 流走到协议结束帧 + 有正文；200 之后流被掐断、无结束帧或流内报错计为流异常。",
 	"推理模型先思考后作答：输出上限（max_tokens）在写出正文前就被思考用完的请求记为「输出上限用尽」——渠道正常应答，不算错误、不影响错误率，首字节/首增量/耗时/吞吐照常统计，只是该条测不到 TTFT。阶梯并发默认上限 2048 足够常见推理模型写出正文；RPM/TPM 只看速率，上限用尽属预期。",
 	"分位数在评估期对正常应答样本确定性计算（线性插值，对齐 numpy type-7 / vLLM bench 口径）。",
 	"预热样本（warmup）不计入任何指标：阶梯并发每档开头的预热请求，以及 RPM/TPM 每档前一半的热身期。",
 	"吞吐（rps / tokens·s⁻¹）按样本时间跨度计（最早排定至最晚完成）；__overall__ 行不含跨档吞吐。",
 	"RPM 实测为开环恒定到达率：dispatched_at 记排定时刻而非起飞时刻（修正协调遗漏）；每档前一半为热身（让渠道消化上一档没清零的计数、令牌桶攒下的突发额度），只用后一半的 429 占比判定是否限速，二分收敛可持续 RPM 边界。",
-	"TPM 实测为开环恒定 token 到达率：每请求 max_tokens 砝码 + 顶格数数 prompt 打满输出，按「输入+输出都计」的每请求 token 权重换算请求速率发压；热身与判定同 RPM，实测 token 吞吐取判定段响应 usage 真实值，二分收敛可持续 TPM 边界。",
-	"收敛值标「截断」表示搜索撞上总请求/总 token/整任务时长上限：尚未出现限速档时它只是下界（真实边界 ≥ 该值），已出现限速档时二分未完成、精度不足。",
+	"TPM 实测为开环恒定 token 到达率：每请求 max_tokens 砝码 + 顶格数数 prompt 打满输出，按「输入+输出都计」的每请求 token 权重（输入目标期望值 + 输出目标）换算请求速率发压；热身与判定同 RPM，实测 token 吞吐取判定段响应 usage 真实值，二分收敛可持续 TPM 边界。",
+	"收敛值标「截断」表示搜索撞上总请求/总 token/整任务时长上限：尚未出现限速档时它只是下界（真实边界 ≥ 该值），已出现限速档时二分未完成、精度不足。总 token 上限按「输入目标 + 输出目标」在发出前预扣、出结果后按实测补差。",
+	"负载画像·输入：按「确定性英文填充文本 × 实测字符/token 比」塑形，问题放在最后一句。任务开头发 1 条定标请求（计预热、不进统计）读渠道回报的 prompt_tokens 测出比例，名义比/实测比/偏差见报告；目标输入 vs 实测输入的 |偏差| p95 超 ±10% 时该档标黄。",
+	"负载画像·缓存：目标命中率 h>0 时每条 prompt 以约 h×输入目标、任务内字节相同的共享前缀开头（anthropic 放独立 content block 并加 cache_control，openai 两协议直接拼在最前面走自动前缀缓存），唯一标记紧随其后；定标后串行发 2 条写缓存请求（计预热）。实测命中率 = Σcached / Σinput（正常应答样本），偏离 h 超 ±0.10 即「渠道缓存未按预期命中」；h>0 时命中缓存的样本照常计入延迟分位。",
+	"负载画像·输出：设了输出目标时三个检测项一律 max_tokens=目标并用顶格数数 prompt 诱导写满，报告给出目标输出 vs 实测 completion 的偏差（推理模型的 completion 含思考 token）。",
+}
+
+// thinkingFootnotes 请求了关思考时的口径说明；有正常应答仍出现推理（关不掉）时追加条数，提醒 TTFT 含思考耗时
+func thinkingFootnotes(params api.StabilityTaskParams, stages []api.StabilityStageMetric) []string {
+	if params.Workload == nil || params.Workload.DisableThinking == nil || !*params.Workload.DisableThinking {
+		return nil
+	}
+	notes := []string{"已请求关闭思考：openai_chat 发 thinking.type=disabled（DeepSeek/GLM/Kimi 等厂商扩展），openai_responses 发 reasoning.effort=none，anthropic 发 thinking.type=disabled。"}
+	seen := 0
+	for _, s := range stages {
+		if s.Stage == stability.StageOverall && s.Metrics.ReasoningSeen != nil {
+			seen += *s.Metrics.ReasoningSeen
+		}
+	}
+	if seen > 0 {
+		notes = append(notes, fmt.Sprintf("关闭思考未生效：%d 条正常应答仍出现推理（渠道或模型不支持关闭）。这些样本照正常应答口径统计，其 TTFT 含思考耗时。", seen))
+	}
+	return notes
 }
 
 func (h *handlers) ListStabilityProbes(w http.ResponseWriter, r *http.Request) {
@@ -120,7 +142,7 @@ func (h *handlers) CreateStabilityTask(w http.ResponseWriter, r *http.Request) {
 
 	// progress_total 取最坏预估上界，但不超过总请求硬闸（闸外一条都不会发）；
 	// 提前收敛则实发少于此值，任务成功时 FinishTask 把进度补满
-	total := 0
+	total := stability.EstPrepRequests(params) // 准备期：定标 + 写缓存
 	for _, p := range probes {
 		total += p.Info.EstRequests(params)
 	}
@@ -472,7 +494,7 @@ func (h *handlers) buildStabilityReport(w http.ResponseWriter, r *http.Request, 
 	if params.Protocol != nil {
 		proto = *params.Protocol
 	}
-	footnotes := stabilityFootnotes
+	footnotes := append(slices.Clone(stabilityFootnotes), thinkingFootnotes(params, stages)...)
 	report := api.StabilityReport{
 		TaskId:      task.ID,
 		Status:      api.TaskStatus(task.Status),
@@ -522,8 +544,8 @@ func resolveStabilityParams(in api.StabilityTaskParams) (stability.StabilityPara
 	if in.WarmupPerStage != nil {
 		p.WarmupPerStage = *in.WarmupPerStage
 	}
-	if in.LadderMaxTokens != nil {
-		p.LadderMaxTokens = *in.LadderMaxTokens
+	if in.Workload != nil {
+		p.Workload = resolveWorkload(*in.Workload)
 	}
 	if in.RpmStartRate != nil {
 		p.RpmStartRate = float64(*in.RpmStartRate)
@@ -536,9 +558,6 @@ func resolveStabilityParams(in api.StabilityTaskParams) (stability.StabilityPara
 	}
 	if in.RpmMaxInFlight != nil {
 		p.RpmMaxInFlight = *in.RpmMaxInFlight
-	}
-	if in.RpmMaxTokens != nil {
-		p.RpmMaxTokens = *in.RpmMaxTokens
 	}
 	if in.RpmLimitThreshold != nil {
 		p.RpmLimitThreshold = float64(*in.RpmLimitThreshold)
@@ -557,9 +576,6 @@ func resolveStabilityParams(in api.StabilityTaskParams) (stability.StabilityPara
 	}
 	if in.TpmMaxInFlight != nil {
 		p.TpmMaxInFlight = *in.TpmMaxInFlight
-	}
-	if in.TpmMaxTokensPerReq != nil {
-		p.TpmMaxTokensPerReq = *in.TpmMaxTokensPerReq
 	}
 	if in.TpmLimitThreshold != nil {
 		p.TpmLimitThreshold = float64(*in.TpmLimitThreshold)
@@ -584,6 +600,28 @@ func resolveStabilityParams(in api.StabilityTaskParams) (stability.StabilityPara
 		return p, err.Error()
 	}
 	return p, ""
+}
+
+// resolveWorkload 负载画像 api → 领域参数。命中率 float32 四舍五入到 4 位小数，去掉二进制尾差（0.3 不能变成 0.30000001）
+func resolveWorkload(in api.StabilityWorkload) stability.Workload {
+	var w stability.Workload
+	if in.Input != nil {
+		w.Input = stability.InputSpec{Mode: string(in.Input.Mode), Value: derefInt(in.Input.Value), Min: derefInt(in.Input.Min), Max: derefInt(in.Input.Max)}
+	}
+	if in.CacheHitRate != nil {
+		w.CacheHitRate = math.Round(float64(*in.CacheHitRate)*10000) / 10000
+	}
+	w.Output = derefInt(in.Output)
+	w.DisableThinking = in.DisableThinking != nil && *in.DisableThinking
+	return w
+}
+
+// derefInt 可选整数：缺省 = 0（领域参数里 0 即「未设」）
+func derefInt(v *int) int {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
 
 func stabilityProbeInfoToAPI(info stability.Info) api.StabilityProbeInfo {
@@ -684,6 +722,14 @@ func stabilitySampleToAPI(r db.ListStabilitySamplesRow) api.StabilitySample {
 	if r.CachedTokens.Valid {
 		v := int(r.CachedTokens.Int32)
 		s.CachedTokens = &v
+	}
+	if r.TargetInputTokens.Valid {
+		v := int(r.TargetInputTokens.Int32)
+		s.TargetInputTokens = &v
+	}
+	if r.TargetOutputTokens.Valid {
+		v := int(r.TargetOutputTokens.Int32)
+		s.TargetOutputTokens = &v
 	}
 	return s
 }

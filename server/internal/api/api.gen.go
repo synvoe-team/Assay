@@ -168,6 +168,30 @@ func (e StabilityMetricsTruncatedBy) Valid() bool {
 	}
 }
 
+// Defines values for StabilityWorkloadInputMode.
+const (
+	Fixed  StabilityWorkloadInputMode = "fixed"
+	Jitter StabilityWorkloadInputMode = "jitter"
+	None   StabilityWorkloadInputMode = "none"
+	Ramp   StabilityWorkloadInputMode = "ramp"
+)
+
+// Valid indicates whether the value is a known member of the StabilityWorkloadInputMode enum.
+func (e StabilityWorkloadInputMode) Valid() bool {
+	switch e {
+	case Fixed:
+		return true
+	case Jitter:
+		return true
+	case None:
+		return true
+	case Ramp:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for TaskStatus.
 const (
 	Canceled  TaskStatus = "canceled"
@@ -704,6 +728,45 @@ type RoleUpdate struct {
 	Permissions *PermissionMap `json:"permissions,omitempty"`
 }
 
+// StabilityCalibration 负载画像定标：任务开始先发一条固定字符数的填充请求，读 prompt_tokens 得实测字符/token 比，后续请求按此比例凑长度
+type StabilityCalibration struct {
+	// CacheWarmCached 写缓存预热的第二条请求实测 cached_tokens（验证共享前缀已写入渠道缓存；无 usage 缺省）
+	CacheWarmCached *int `json:"cacheWarmCached,omitempty"`
+
+	// Chars 定标填充字符数
+	Chars int `json:"chars"`
+
+	// DeviationPct 实测比相对名义比的偏差（%）
+	DeviationPct float32 `json:"deviationPct"`
+
+	// MeasuredRatio 实测字符/token 比
+	MeasuredRatio float32 `json:"measuredRatio"`
+
+	// NominalRatio 名义字符/token 比
+	NominalRatio float32 `json:"nominalRatio"`
+
+	// PromptTokens 定标请求实测 prompt_tokens
+	PromptTokens int `json:"promptTokens"`
+
+	// SharedTokens 共享前缀目标 token 数（缓存命中率 >0 时有）
+	SharedTokens *int `json:"sharedTokens,omitempty"`
+}
+
+// StabilityDeviation 目标 vs 实测 token 的相对偏差分布（%，正 = 实测多于目标）
+type StabilityDeviation struct {
+	// AbsP95 |偏差| 的 p95
+	AbsP95 float32 `json:"absP95"`
+
+	// Exceeded |偏差| p95 超过 ±10%
+	Exceeded bool    `json:"exceeded"`
+	Max      float32 `json:"max"`
+	Min      float32 `json:"min"`
+	P50      float32 `json:"p50"`
+
+	// Samples 参与统计的样本数（正常应答且有 usage）
+	Samples int `json:"samples"`
+}
+
 // StabilityExport 证据链自足的 JSON 导出：任务快照 + 指标报告 + 全量逐请求样本
 type StabilityExport struct {
 	// Report 稳定性指标报告：档级 + overall 聚合，口径见 footnotes
@@ -728,8 +791,20 @@ type StabilityMetrics struct {
 	// ByErrorClass 各错误分类计数
 	ByErrorClass *map[string]int `json:"byErrorClass,omitempty"`
 
+	// CacheExpected 目标缓存命中率 h（仅 >0 时有）
+	CacheExpected *float32 `json:"cacheExpected,omitempty"`
+
+	// CacheHitRate 实测缓存命中率 = Σcached_tokens / Σinput_tokens（正常应答样本；仅目标命中率 >0 时有）
+	CacheHitRate *float32 `json:"cacheHitRate,omitempty"`
+
 	// CacheHits 输入命中缓存的成功条数；不计入延迟分位
 	CacheHits *int `json:"cacheHits,omitempty"`
+
+	// CacheMiss 实测命中率偏离目标超过 ±0.10（渠道缓存未按预期命中）
+	CacheMiss *bool `json:"cacheMiss,omitempty"`
+
+	// Calibration __overall__ 负载画像定标结果（仅输入塑形时有）
+	Calibration *StabilityCalibration `json:"calibration,omitempty"`
 
 	// Concurrency 阶梯并发档的并发数（其它 probe 缺省）
 	Concurrency *int `json:"concurrency,omitempty"`
@@ -744,6 +819,12 @@ type StabilityMetrics struct {
 	ErrorRate float32 `json:"errorRate"`
 	Errors    int     `json:"errors"`
 
+	// InputDeviation 目标输入 vs 实测 prompt_tokens 的相对偏差分布（仅输入塑形时有）
+	InputDeviation *StabilityDeviation `json:"inputDeviation,omitempty"`
+
+	// OutputDeviation 目标输出 vs 实测 completion_tokens 的相对偏差分布（仅有输出目标时有）
+	OutputDeviation *StabilityDeviation `json:"outputDeviation,omitempty"`
+
 	// RateLimitHeaders 最近一次响应携带的限速头快照（x-ratelimit-*/anthropic-ratelimit-*/retry-after）
 	RateLimitHeaders *map[string]string `json:"rateLimitHeaders,omitempty"`
 
@@ -752,6 +833,9 @@ type StabilityMetrics struct {
 
 	// ReachedCap __overall__ 探到速率护栏顶仍未限速（真实边界≥护栏）
 	ReachedCap *bool `json:"reachedCap,omitempty"`
+
+	// ReasoningSeen 正常应答中出现推理增量的条数（请求关闭思考时据此判断是否关掉）
+	ReasoningSeen *int `json:"reasoningSeen,omitempty"`
 
 	// Requests 计入统计的请求数（已剔除预热）
 	Requests int `json:"requests"`
@@ -852,8 +936,14 @@ type StabilitySample struct {
 	Seq        int      `json:"seq"`
 	Stage      string   `json:"stage"`
 	StageIndex int      `json:"stageIndex"`
-	TotalMs    *int     `json:"totalMs,omitempty"`
-	TtfbMs     *int     `json:"ttfbMs,omitempty"`
+
+	// TargetInputTokens 本条请求的目标输入 token（仅输入塑形时有）
+	TargetInputTokens *int `json:"targetInputTokens,omitempty"`
+
+	// TargetOutputTokens 本条请求的目标输出 token（有输出目标时有）
+	TargetOutputTokens *int `json:"targetOutputTokens,omitempty"`
+	TotalMs            *int `json:"totalMs,omitempty"`
+	TtfbMs             *int `json:"ttfbMs,omitempty"`
 
 	// TtfdMs 首个非空增量（推理或正文）耗时
 	TtfdMs *int `json:"ttfdMs,omitempty"`
@@ -917,9 +1007,6 @@ type StabilityTaskParams struct {
 	// ConcurrencyLadder 阶梯并发的并发档序列（闭环）
 	ConcurrencyLadder *[]int `json:"concurrencyLadder,omitempty"`
 
-	// LadderMaxTokens 每请求生成上限（max_tokens）；推理模型先思考再写正文，太小会被思考占满、测不到 TTFT
-	LadderMaxTokens *int `json:"ladderMaxTokens,omitempty"`
-
 	// MaxDurationSec 整任务墙钟上限（秒）；到点停派新请求、在途的跑完，已出结果照常出报告并标截断
 	MaxDurationSec *int `json:"maxDurationSec,omitempty"`
 
@@ -950,9 +1037,6 @@ type StabilityTaskParams struct {
 	// RpmMaxRate RPM 探测速率护栏上限（req/s）；升到此仍不限速则报「边界≥上限」
 	RpmMaxRate *float32 `json:"rpmMaxRate,omitempty"`
 
-	// RpmMaxTokens RPM 每请求生成上限（只关心请求速率，取小）
-	RpmMaxTokens *int `json:"rpmMaxTokens,omitempty"`
-
 	// RpmStageSec RPM 每档发压时长（秒）；前一半为热身（消化渠道残留计数/突发额度），只用后一半判限速
 	RpmStageSec *int `json:"rpmStageSec,omitempty"`
 
@@ -971,9 +1055,6 @@ type StabilityTaskParams struct {
 	// TpmMaxRate TPM 探测 token 速率护栏上限（token/s）；升到此仍不限速则报「边界≥上限」
 	TpmMaxRate *float32 `json:"tpmMaxRate,omitempty"`
 
-	// TpmMaxTokensPerReq TPM 每请求 max_tokens 砝码（顶格数数 prompt 保证打满输出；输入+输出都计）
-	TpmMaxTokensPerReq *int `json:"tpmMaxTokensPerReq,omitempty"`
-
 	// TpmStageSec TPM 每档发压时长（秒）；前一半为热身，只用后一半判限速
 	TpmStageSec *int `json:"tpmStageSec,omitempty"`
 
@@ -982,7 +1063,41 @@ type StabilityTaskParams struct {
 
 	// WarmupPerStage 每档预热请求数（评估时剔除，不计入指标）；缺省 0（不预热）
 	WarmupPerStage *int `json:"warmupPerStage,omitempty"`
+
+	// Workload 负载画像：控制每条压测请求的输入 token 数、缓存命中率、输出 token 数。全缺省 = 小输入、不共享前缀、输出沿用各检测项默认
+	Workload *StabilityWorkload `json:"workload,omitempty"`
 }
+
+// StabilityWorkload 负载画像：控制每条压测请求的输入 token 数、缓存命中率、输出 token 数。全缺省 = 小输入、不共享前缀、输出沿用各检测项默认
+type StabilityWorkload struct {
+	// CacheHitRate 目标缓存命中率 h（0-0.95）；>0 时每条 prompt 以约 h×输入目标的任务内共享前缀开头，须配合输入塑形且共享前缀 ≥1024 token
+	CacheHitRate *float32 `json:"cacheHitRate,omitempty"`
+
+	// DisableThinking 按协议官方参数请求关闭思考（chat 发 thinking.type=disabled、responses 发 reasoning.effort=none、anthropic 发 thinking.type=disabled）；关不掉的照正常应答口径统计并在报告注明
+	DisableThinking *bool `json:"disableThinking,omitempty"`
+
+	// Input 每条压测请求的输入 token 目标。none=沿用小 prompt（不塑形）；fixed=固定目标；ramp=按本档排定顺序从 min 匀速涨到 max；jitter=[min,max] 内均匀随机（以任务 ID 做种，可复现）
+	Input *StabilityWorkloadInput `json:"input,omitempty"`
+
+	// Output 每请求输出 token 目标：max_tokens=该值并用顶格数数 prompt 诱导写满；缺省 = 各检测项默认（阶梯并发 2048 / RPM 16 / TPM 256）
+	Output *int `json:"output,omitempty"`
+}
+
+// StabilityWorkloadInput 每条压测请求的输入 token 目标。none=沿用小 prompt（不塑形）；fixed=固定目标；ramp=按本档排定顺序从 min 匀速涨到 max；jitter=[min,max] 内均匀随机（以任务 ID 做种，可复现）
+type StabilityWorkloadInput struct {
+	// Max ramp/jitter 区间上限（须大于 min）
+	Max *int `json:"max,omitempty"`
+
+	// Min ramp/jitter 区间下限
+	Min  *int                       `json:"min,omitempty"`
+	Mode StabilityWorkloadInputMode `json:"mode"`
+
+	// Value fixed 模式的目标 token 数
+	Value *int `json:"value,omitempty"`
+}
+
+// StabilityWorkloadInputMode defines model for StabilityWorkloadInput.Mode.
+type StabilityWorkloadInputMode string
 
 // TaskStatBucket defines model for TaskStatBucket.
 type TaskStatBucket struct {

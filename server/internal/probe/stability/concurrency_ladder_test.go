@@ -70,7 +70,6 @@ func TestLadderHappyPath(t *testing.T) {
 		ConcurrencyLadder: []int{1, 2},
 		RequestsPerStage:  3,
 		WarmupPerStage:    1,
-		LadderMaxTokens:   16,
 		RequestTimeoutMs:  5000,
 	}
 	params.ApplyDefaults()
@@ -126,7 +125,6 @@ func TestLadderCapStops(t *testing.T) {
 		ConcurrencyLadder: []int{1},
 		RequestsPerStage:  10,
 		WarmupPerStage:    0,
-		LadderMaxTokens:   16,
 		RequestTimeoutMs:  5000,
 	}
 	params.ApplyDefaults()
@@ -155,7 +153,6 @@ func TestLadderRateLimited(t *testing.T) {
 		ConcurrencyLadder: []int{1},
 		RequestsPerStage:  2,
 		WarmupPerStage:    0,
-		LadderMaxTokens:   16,
 		RequestTimeoutMs:  5000,
 	}
 	params.ApplyDefaults()

@@ -18,10 +18,16 @@ type openaiResponses struct{}
 func init() { register(openaiResponses{}) }
 
 type responsesBody struct {
-	Model           string `json:"model"`
-	Input           string `json:"input"`
-	MaxOutputTokens int    `json:"max_output_tokens"`
-	Stream          bool   `json:"stream"`
+	Model           string              `json:"model"`
+	Input           string              `json:"input"`
+	MaxOutputTokens int                 `json:"max_output_tokens"`
+	Stream          bool                `json:"stream"`
+	Reasoning       *responsesReasoning `json:"reasoning,omitempty"`
+}
+
+// responsesReasoning 官方推理参数；effort=none 即不推理（OpenAI gpt-5.1 起、DeepSeek responses 均支持）
+type responsesReasoning struct {
+	Effort string `json:"effort"`
 }
 
 func (openaiResponses) ID() string   { return ProtocolOpenAIResponses }
@@ -31,16 +37,17 @@ func (openaiResponses) Auth(req *http.Request, apiKey string) {
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 }
 
-func (openaiResponses) LoadBody(model, content string, maxTokens int) ([]byte, error) {
-	if maxTokens < responsesMinMaxTokens {
-		maxTokens = responsesMinMaxTokens // 低于下限上游直接 400
-	}
-	return probe.MarshalNoEscape(responsesBody{
-		Model:           model,
-		Input:           content,
-		MaxOutputTokens: maxTokens,
+func (openaiResponses) LoadBody(l Load) ([]byte, error) {
+	b := responsesBody{
+		Model:           l.Model,
+		Input:           l.Prompt.Text(),
+		MaxOutputTokens: max(l.MaxTokens, responsesMinMaxTokens), // 低于下限上游直接 400
 		Stream:          true,
-	})
+	}
+	if l.DisableThinking {
+		b.Reasoning = &responsesReasoning{Effort: "none"}
+	}
+	return probe.MarshalNoEscape(b)
 }
 
 func (openaiResponses) ScanStream(r io.Reader, h Hooks) (Result, error) {

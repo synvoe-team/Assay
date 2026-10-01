@@ -10,11 +10,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const (
-	ladderProbeID = "concurrency_ladder"
-	// ladderPrompt 固定小 prompt：稳定输入、有一定生成量，供延迟观测
-	ladderPrompt = "用一句话简要介绍你自己。"
-)
+const ladderProbeID = "concurrency_ladder"
 
 // NewConcurrencyLadder 阶梯并发检测项（闭环）：逐档固定并发压测，测延迟曲线 + 吞吐 + 错误率。
 func NewConcurrencyLadder() Probe {
@@ -50,11 +46,9 @@ func runLadder(ctx context.Context, in RunInput) error {
 		if err != nil {
 			return err
 		}
-		sm := evaluateStage(in.Probe, stage, si, c, samples)
-		if in.Metric != nil {
-			if err := in.Metric(ctx, sm); err != nil {
-				return err
-			}
+		sm := evaluateStage(in.Probe, stage, si, c, in.Params.Workload.CacheHitRate, samples)
+		if err := in.emit(ctx, sm); err != nil {
+			return err
 		}
 		overall = append(overall, measured(samples)...)
 		if stop {
@@ -62,13 +56,7 @@ func runLadder(ctx context.Context, in RunInput) error {
 		}
 	}
 
-	om := evaluateOverall(in.Probe, overall)
-	if in.Metric != nil {
-		if err := in.Metric(ctx, om); err != nil {
-			return err
-		}
-	}
-	return nil
+	return in.emit(ctx, evaluateOverall(in.Probe, in.Params.Workload.CacheHitRate, overall))
 }
 
 // runLadderStage 跑一档：先 WarmupPerStage 预热、再 RequestsPerStage 计入，均固定并发 c。
@@ -83,29 +71,27 @@ func runLadderStage(ctx context.Context, in RunInput, stageIndex int, stage stri
 	stop := false
 
 	for seq := 0; seq < n; seq++ {
-		// 硬闸检查在派发前（主 goroutine）：碰上限即停派后续，本档收敛
-		if !in.Caps.Reserve() {
+		// 硬闸检查在派发前（主 goroutine）：按名义 token 预扣，碰上限即停派后续，本档收敛
+		sp := in.spec(stage, seq, n, ladderOutput)
+		est := in.nominal(sp)
+		if !in.Caps.Reserve(est) {
 			stop = true
 			break
 		}
-		seq := seq
 		warmup := seq < in.Params.WarmupPerStage
 		g.Go(func() error {
 			if gctx.Err() != nil {
 				return gctx.Err()
 			}
-			// 闭环：dispatched_at 记实际起飞时刻（并发槽就绪即发）
+			p := in.prompt(sp)
+			// 闭环：dispatched_at 记实际起飞时刻（并发槽就绪、prompt 拼好即发）
 			dispatchedAt := time.Now()
-			o := doRequest(gctx, in.Client, in.Codec, in.Target.BaseURL, in.APIKey,
-				in.Target.Model, uniquePrompt(in.Nonce, stage, seq, ladderPrompt), in.Params.LadderMaxTokens, in.Params.RequestTimeoutMs)
+			o := in.exec(gctx, sp, p, est)
 			// 中止（关停/取消）时不落污染样本：context canceled 非渠道行为
 			if gctx.Err() != nil {
 				return gctx.Err()
 			}
-			if in.Caps != nil && o.Usage.Ok {
-				in.Caps.AddTokens(o.Usage.Prompt + o.Usage.Completion)
-			}
-			s := sampleFrom(stage, stageIndex, seq, warmup, dispatchedAt, in.Codec.ID(), o)
+			s := sampleFrom(sp, stageIndex, warmup, dispatchedAt, in.Codec.ID(), o)
 
 			smu.Lock()
 			samples = append(samples, s)

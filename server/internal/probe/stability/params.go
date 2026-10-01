@@ -8,35 +8,34 @@ import (
 	"fmt"
 )
 
-// StabilityParams 稳定性任务运行参数（落 tasks.params jsonb）。
-// Phase 1 仅含阶梯并发字段 + 全局硬闸；RPM/TPM 字段随其 probe 在后续阶段加入。
+// StabilityParams 稳定性任务运行参数（落 tasks.params jsonb）：协议 + 负载画像 + 各 probe 档位 + 全局硬闸。
 type StabilityParams struct {
 	// Protocol 本任务实选协议（三协议择一），写进快照
 	Protocol string `json:"protocol"`
+
+	// Workload 负载画像：每条请求的输入 token / 缓存命中率 / 输出 token，三个 probe 共用
+	Workload Workload `json:"workload"`
 
 	// —— 阶梯并发（闭环，测延迟曲线）——
 	ConcurrencyLadder []int `json:"concurrencyLadder"` // 各并发档，默认 [1,2,4,8,16]
 	RequestsPerStage  int   `json:"requestsPerStage"`  // 每档计入统计的请求数，默认 20
 	WarmupPerStage    int   `json:"warmupPerStage"`    // 每档预热请求数（评估剔除），默认 2
-	LadderMaxTokens   int   `json:"ladderMaxTokens"`   // 每请求生成上限，默认 2048（推理模型先思考再写正文，太小测不到 TTFT）
 
 	// —— RPM 实测（开环，恒定到达率二分收敛速率边界）——
 	RpmStartRate      float64 `json:"rpmStartRate"`      // 起始到达率 req/s，默认 2
 	RpmMaxRate        float64 `json:"rpmMaxRate"`        // 探测速率护栏上限 req/s，默认 20
 	RpmStageSec       int     `json:"rpmStageSec"`       // 每档发压时长秒：前一半热身、只用后一半判限速（后一半≈对限流窗口的假设），默认 120
 	RpmMaxInFlight    int     `json:"rpmMaxInFlight"`    // 在途请求上限（防雪崩兜底），默认 128
-	RpmMaxTokens      int     `json:"rpmMaxTokens"`      // 每请求生成上限（RPM 只关心请求速率，取小），默认 16
 	RpmLimitThreshold float64 `json:"rpmLimitThreshold"` // 判定本档触发限速的 429 占比阈值，默认 0.1
 	RpmBinarySteps    int     `json:"rpmBinarySteps"`    // 找到限速档后二分细化步数，默认 4
 
 	// —— TPM 实测（开环，恒定 token 到达率二分收敛 token 速率边界；输入+输出都计）——
-	TpmStartRate       float64 `json:"tpmStartRate"`       // 起始 token 到达率 token/s，默认 200
-	TpmMaxRate         float64 `json:"tpmMaxRate"`         // 探测 token 速率护栏上限 token/s，默认 2000
-	TpmStageSec        int     `json:"tpmStageSec"`        // 每档发压时长秒：前一半热身、只用后一半判限速（后一半≈对限流窗口的假设），默认 120
-	TpmMaxInFlight     int     `json:"tpmMaxInFlight"`     // 在途请求上限（防雪崩兜底），默认 128
-	TpmMaxTokensPerReq int     `json:"tpmMaxTokensPerReq"` // 每请求 max_tokens 砝码（顶格 prompt 保证打满输出），默认 256
-	TpmLimitThreshold  float64 `json:"tpmLimitThreshold"`  // 判定本档触发限速的 429 占比阈值，默认 0.1
-	TpmBinarySteps     int     `json:"tpmBinarySteps"`     // 找到限速档后二分细化步数，默认 4
+	TpmStartRate      float64 `json:"tpmStartRate"`      // 起始 token 到达率 token/s，默认 200
+	TpmMaxRate        float64 `json:"tpmMaxRate"`        // 探测 token 速率护栏上限 token/s，默认 2000
+	TpmStageSec       int     `json:"tpmStageSec"`       // 每档发压时长秒：前一半热身、只用后一半判限速（后一半≈对限流窗口的假设），默认 120
+	TpmMaxInFlight    int     `json:"tpmMaxInFlight"`    // 在途请求上限（防雪崩兜底），默认 128
+	TpmLimitThreshold float64 `json:"tpmLimitThreshold"` // 判定本档触发限速的 429 占比阈值，默认 0.1
+	TpmBinarySteps    int     `json:"tpmBinarySteps"`    // 找到限速档后二分细化步数，默认 4
 
 	// —— 全局硬闸（成本护栏，碰任一即停）——
 	MaxTotalRequests int `json:"maxTotalRequests"` // 累计请求上限，默认 10000
@@ -49,7 +48,6 @@ type StabilityParams struct {
 const (
 	DefaultRequestsPerStage = 20
 	DefaultWarmupPerStage   = 2
-	DefaultLadderMaxTokens  = 2048
 	DefaultMaxTotalRequests = 10000
 	DefaultMaxTotalTokens   = 2_000_000
 	DefaultMaxDurationSec   = 3600
@@ -59,17 +57,21 @@ const (
 	DefaultRpmMaxRate        = 20.0
 	DefaultRpmStageSec       = 120
 	DefaultRpmMaxInFlight    = 128
-	DefaultRpmMaxTokens      = 16
 	DefaultRpmLimitThreshold = 0.1
 	DefaultRpmBinarySteps    = 4
 
-	DefaultTpmStartRate       = 200.0
-	DefaultTpmMaxRate         = 2000.0
-	DefaultTpmStageSec        = 120
-	DefaultTpmMaxInFlight     = 128
-	DefaultTpmMaxTokensPerReq = 256
-	DefaultTpmLimitThreshold  = 0.1
-	DefaultTpmBinarySteps     = 4
+	DefaultTpmStartRate      = 200.0
+	DefaultTpmMaxRate        = 2000.0
+	DefaultTpmStageSec       = 120
+	DefaultTpmMaxInFlight    = 128
+	DefaultTpmLimitThreshold = 0.1
+	DefaultTpmBinarySteps    = 4
+
+	// 未设 workload.output 时各 probe 的生成上限：阶梯并发要容得下推理模型先思考再写正文（太小测不到 TTFT）；
+	// RPM 只关心请求速率取小；TPM 是每请求 token 砝码（顶格 prompt 打满）
+	DefaultLadderMaxTokens = 2048
+	DefaultRpmMaxTokens    = 16
+	DefaultTpmMaxTokens    = 256
 )
 
 // DefaultConcurrencyLadder 默认并发阶梯
@@ -83,8 +85,8 @@ func (p *StabilityParams) ApplyDefaults() {
 	if p.RequestsPerStage == 0 {
 		p.RequestsPerStage = DefaultRequestsPerStage
 	}
-	if p.LadderMaxTokens == 0 {
-		p.LadderMaxTokens = DefaultLadderMaxTokens
+	if p.Workload.Input.Mode == "" {
+		p.Workload.Input.Mode = InputNone
 	}
 	if p.RpmStartRate == 0 {
 		p.RpmStartRate = DefaultRpmStartRate
@@ -97,9 +99,6 @@ func (p *StabilityParams) ApplyDefaults() {
 	}
 	if p.RpmMaxInFlight == 0 {
 		p.RpmMaxInFlight = DefaultRpmMaxInFlight
-	}
-	if p.RpmMaxTokens == 0 {
-		p.RpmMaxTokens = DefaultRpmMaxTokens
 	}
 	if p.RpmLimitThreshold == 0 {
 		p.RpmLimitThreshold = DefaultRpmLimitThreshold
@@ -118,9 +117,6 @@ func (p *StabilityParams) ApplyDefaults() {
 	}
 	if p.TpmMaxInFlight == 0 {
 		p.TpmMaxInFlight = DefaultTpmMaxInFlight
-	}
-	if p.TpmMaxTokensPerReq == 0 {
-		p.TpmMaxTokensPerReq = DefaultTpmMaxTokensPerReq
 	}
 	if p.TpmLimitThreshold == 0 {
 		p.TpmLimitThreshold = DefaultTpmLimitThreshold
@@ -161,9 +157,6 @@ func (p StabilityParams) Validate() error {
 	if p.WarmupPerStage < 0 || p.WarmupPerStage > 100 {
 		return errors.New("每档预热数需 0-100")
 	}
-	if p.LadderMaxTokens < 1 || p.LadderMaxTokens > 4096 {
-		return errors.New("生成上限需 1-4096")
-	}
 	if p.RpmStartRate <= 0 || p.RpmStartRate > 1000 {
 		return errors.New("RPM 起始速率需 0-1000 req/s")
 	}
@@ -175,9 +168,6 @@ func (p StabilityParams) Validate() error {
 	}
 	if p.RpmMaxInFlight < 1 || p.RpmMaxInFlight > 4096 {
 		return errors.New("RPM 在途上限需 1-4096")
-	}
-	if p.RpmMaxTokens < 1 || p.RpmMaxTokens > 4096 {
-		return errors.New("RPM 生成上限需 1-4096")
 	}
 	if p.RpmLimitThreshold <= 0 || p.RpmLimitThreshold > 1 {
 		return errors.New("RPM 限速阈值需 0-1（429 占比）")
@@ -197,9 +187,6 @@ func (p StabilityParams) Validate() error {
 	if p.TpmMaxInFlight < 1 || p.TpmMaxInFlight > 4096 {
 		return errors.New("TPM 在途上限需 1-4096")
 	}
-	if p.TpmMaxTokensPerReq < 1 || p.TpmMaxTokensPerReq > 8192 {
-		return errors.New("TPM 每请求 max_tokens 需 1-8192")
-	}
 	if p.TpmLimitThreshold <= 0 || p.TpmLimitThreshold > 1 {
 		return errors.New("TPM 限速阈值需 0-1（429 占比）")
 	}
@@ -217,6 +204,36 @@ func (p StabilityParams) Validate() error {
 	}
 	if p.RequestTimeoutMs < 1000 || p.RequestTimeoutMs > 600000 {
 		return errors.New("单请求超时需 1000-600000ms")
+	}
+	return p.validateWorkload()
+}
+
+// validateWorkload 负载画像的 fail-fast：取值范围、缓存命中率的可行性、单请求名义 token 与超时下限。
+func (p StabilityParams) validateWorkload() error {
+	w := p.Workload
+	if err := w.Input.validate(); err != nil {
+		return err
+	}
+	if w.Output < 0 || w.Output > maxOutputTokens {
+		return fmt.Errorf("输出 token 目标需 1-%d（不填 = 各检测项默认）", maxOutputTokens)
+	}
+	if err := w.validateCache(); err != nil {
+		return err
+	}
+	if !w.Input.shaped() {
+		return nil
+	}
+	// 单请求名义 token = 最大输入 + 输出上限（未设输出目标时按各 probe 默认里最大的阶梯并发 2048 计）
+	output := w.Output
+	if output == 0 {
+		output = DefaultLadderMaxTokens
+	}
+	if nominal := w.Input.ceil() + output; nominal > p.MaxTotalTokens {
+		return fmt.Errorf("单条请求名义 %d token（输入 %d + 输出 %d）已超过总 token 上限 %d，一条都发不出去", nominal, w.Input.ceil(), output, p.MaxTotalTokens)
+	}
+	// 超时下限：大输入的 prefill 本身就慢，按每千 token 1 秒、不低于 60 秒
+	if floor := max(minShapedTimeoutMs, w.Input.ceil()*timeoutMsPerToken); p.RequestTimeoutMs < floor {
+		return fmt.Errorf("输入最大 %d token 时单请求超时至少 %dms（每千 token 1 秒、不低于 60 秒），当前 %dms", w.Input.ceil(), floor, p.RequestTimeoutMs)
 	}
 	return nil
 }

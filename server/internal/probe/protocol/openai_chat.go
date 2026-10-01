@@ -25,6 +25,9 @@ type chatBody struct {
 	MaxTokens     int               `json:"max_tokens"`
 	Stream        bool              `json:"stream"`
 	StreamOptions chatStreamOptions `json:"stream_options"`
+	// Thinking 关思考：chat 协议没有官方关思考参数（reasoning_effort 各家取值互不兼容，OpenAI 官方推理模型
+	// 请走 responses 协议），取 DeepSeek/GLM/Kimi/豆包通行的 thinking.type=disabled；严格校验参数的上游会 400
+	Thinking *thinkingConfig `json:"thinking,omitempty"`
 }
 
 func (openaiChat) ID() string   { return ProtocolOpenAIChat }
@@ -34,14 +37,18 @@ func (openaiChat) Auth(req *http.Request, apiKey string) {
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 }
 
-func (openaiChat) LoadBody(model, content string, maxTokens int) ([]byte, error) {
-	return probe.MarshalNoEscape(chatBody{
-		Model:         model,
-		Messages:      []message{{Role: "user", Content: content}},
-		MaxTokens:     maxTokens,
+func (openaiChat) LoadBody(l Load) ([]byte, error) {
+	b := chatBody{
+		Model:         l.Model,
+		Messages:      []message{{Role: "user", Content: l.Prompt.Text()}},
+		MaxTokens:     l.MaxTokens,
 		Stream:        true,
 		StreamOptions: chatStreamOptions{IncludeUsage: true},
-	})
+	}
+	if l.DisableThinking {
+		b.Thinking = thinkingDisabled
+	}
+	return probe.MarshalNoEscape(b)
 }
 
 func (openaiChat) ScanStream(r io.Reader, h Hooks) (Result, error) {

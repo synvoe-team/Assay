@@ -10,18 +10,12 @@ import (
 
 const (
 	tpmProbeID = "tpm_probe"
-	// tpmPrompt 顶格数数 prompt：诱导模型一直生成到 max_tokens，保证每请求输出打满砝码，
-	// 使「每请求 token 权重 ≈ 输入 + max_tokens」稳定成立，token 到达率才可控。
-	tpmPrompt = "请从 1 开始逐个数数：1、2、3、4 …… 一直数下去，数字之间用顿号分隔，不要停、不要重复、不要输出任何多余说明。"
-	// tpmInputTokensEst 固定 prompt（含 uniquePrompt 前缀约 8 token）的输入 token 名义估算，
-	// 仅用于「目标 token 速率 → 请求速率」的先验换算；实测 token 吞吐仍以响应 usage 的真实输入+输出为准。
-	tpmInputTokensEst = 24.0
 	// tpmRateTol 二分收敛精度：档间 token 速率差窄于此即停（≈1200 TPM 分辨率）
 	tpmRateTol = 20.0
 )
 
 // NewTpmProbe TPM 实测检测项（开环）：恒定 token 到达率阶梯升压，出现持续 429 后二分收敛真实 TPM 边界。
-// 保守假设「输入+输出都计」：max_tokens 砝码 + 顶格数数 prompt 打满输出，每请求 token 权重可预估。
+// 保守假设「输入+输出都计」：输入按负载画像塑形、输出用 max_tokens 砝码 + 顶格数数 prompt 打满，每请求 token 权重可预估。
 func NewTpmProbe() Probe {
 	return Probe{
 		Info: Info{
@@ -35,13 +29,15 @@ func NewTpmProbe() Probe {
 	}
 }
 
-// tpmWeightPerReq 每请求 token 权重（名义）：输入估算 + max_tokens 砝码。用于把目标 token 速率换算成请求速率。
+// tpmWeightPerReq 每请求 token 权重（名义）：输入目标期望值（递增/抖动取区间均值；不塑形按小 prompt 名义估）
+// + 输出目标。仅用于「目标 token 速率 → 请求速率」的先验换算；实测 token 吞吐仍以响应 usage 为准。
 func tpmWeightPerReq(p StabilityParams) float64 {
-	w := tpmInputTokensEst + float64(p.TpmMaxTokensPerReq)
-	if w <= 0 {
-		w = 1
+	w := p.Workload
+	input := w.Input.mean()
+	if !w.Input.shaped() {
+		input = float64(nominalTokens(uniquePrompt("xxxxxxxx", "t0", 0, countPrompt)))
 	}
-	return w
+	return input + float64(w.maxTokens(tpmOutput))
 }
 
 // tpmStageLabel token 速率档标识（图表 x 轴），如 t200 / t1500。单次运行内各档 token 速率互异。
@@ -103,8 +99,7 @@ func runTpm(ctx context.Context, in RunInput) error {
 		stage := tpmStageLabel(tokenRate)
 		cfg := pacedStageConfig{
 			TargetRate:  reqRate,
-			MaxTokens:   p.TpmMaxTokensPerReq,
-			Prompt:      tpmPrompt,
+			Output:      tpmOutput,
 			Duration:    stageDur,
 			Warmup:      stageDur / 2, // 前一半热身，只用后一半判定（见 pacedStageConfig.Warmup）
 			MaxInFlight: p.TpmMaxInFlight,
@@ -125,11 +120,9 @@ func runTpm(ctx context.Context, in RunInput) error {
 		if res.RateHeaders != nil {
 			lastHeaders = res.RateHeaders
 		}
-		sm := evaluateTpmStage(in.Probe, stage, stageIndex, reqRate, achievedReq, tokenRate, achievedTok, limited, res.RateHeaders, res.Samples)
-		if in.Metric != nil {
-			if err := in.Metric(ctx, sm); err != nil {
-				return stageOutcome{}, err
-			}
+		sm := evaluateTpmStage(in.Probe, stage, stageIndex, p.Workload.CacheHitRate, reqRate, achievedReq, tokenRate, achievedTok, limited, res.RateHeaders, res.Samples)
+		if err := in.emit(ctx, sm); err != nil {
+			return stageOutcome{}, err
 		}
 		overall = append(overall, judged...)
 		stageIndex++
@@ -140,11 +133,5 @@ func runTpm(ctx context.Context, in RunInput) error {
 	if err != nil {
 		return err
 	}
-	om := evaluateTpmOverall(in.Probe, overall, b, p.TpmMaxRate, in.Caps.Reason(), lastHeaders)
-	if in.Metric != nil {
-		if err := in.Metric(ctx, om); err != nil {
-			return err
-		}
-	}
-	return nil
+	return in.emit(ctx, evaluateTpmOverall(in.Probe, p.Workload.CacheHitRate, overall, b, p.TpmMaxRate, in.Caps.Reason(), lastHeaders))
 }
