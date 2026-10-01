@@ -291,7 +291,7 @@ const zh = {
   'stab.truncatedLowerNote': '尚未出现限速，真实边界 ≥ 该值',
   'stab.truncatedBinaryNote': '已出现限速但二分未完成，精度不足',
   'stab.budgetExhaustedBanner':
-    '有请求在写出正文前就用完了输出上限（max_tokens）：推理模型会先思考再作答，上限太小时思考就把它占满了。这不是渠道报错，也和账户额度无关，只是这些请求测不到首字时间（TTFT）。在负载画像里把「输出目标」调大（阶梯并发默认 2048）后重跑即可。',
+    '有请求在写出正文前就用完了输出上限（max_tokens）：推理模型会先思考再作答，上限太小时思考就把它占满了。这不是渠道报错，也和账户额度无关，只是这些请求测不到首字时间（TTFT）。在负载画像里把「输出目标」调大（阶梯并发默认 2048），或打开「关闭思考」后重跑即可。',
   'stab.cacheHitsNote': '意外命中输入缓存的请求（已从延迟分位剔除）',
   'stab.ttfd': 'TTFD',
   'stab.rateLimitHeaders': '限速响应头',
@@ -698,7 +698,7 @@ const en: Record<DictKey, string> = {
   'stab.truncatedLowerNote': 'no rate limit seen yet; true boundary ≥ this value',
   'stab.truncatedBinaryNote': 'rate limit seen but binary search unfinished; low precision',
   'stab.budgetExhaustedBanner':
-    'Some requests used up max_tokens before writing any answer: reasoning models think first, and a small cap is filled by thinking alone. This is not a channel error and has nothing to do with account quota; those requests just have no TTFT. Raise the workload "Output target" (ladder default 2048) and rerun.',
+    'Some requests used up max_tokens before writing any answer: reasoning models think first, and a small cap is filled by thinking alone. This is not a channel error and has nothing to do with account quota; those requests just have no TTFT. Raise the workload "Output target" (ladder default 2048) or turn on "Disable thinking", then rerun.',
   'stab.cacheHitsNote': 'Requests unexpectedly hitting input cache (excluded from latency percentiles)',
   'stab.ttfd': 'TTFD',
   'stab.rateLimitHeaders': 'Rate-limit headers',
